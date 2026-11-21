@@ -49,7 +49,10 @@ class DemoLogger(Node):
         if not self.topics_and_types_path.exists():
             self.get_logger().error("No topics and types path provided. Please set 'topics_and_types_path' parameter.")
             raise ValueError("No topics and types path provided.")
-        self.topics_and_types = yaml.safe_load(self.topics_and_types_path.read_text())['topics_and_types']
+        logger_cfg = yaml.safe_load(self.topics_and_types_path.read_text())
+        self.topics_and_types = logger_cfg['topics_and_types']
+        # Optional: {topic: Hz}. Messages of these topics that arrive faster are dropped.
+        self.max_rate_hz = logger_cfg.get('max_rate_hz') or {}
         assert isinstance(self.topics_and_types, dict), "topics_and_types should be a dictionary mapping topic names to types."
         # Convert topic names to actual message classes
         self.topics_and_types = {
@@ -194,14 +197,27 @@ class DemoLogger(Node):
                 self.create_subscription(
                     topic_type,
                     topic_name,
-                    lambda msg, topic_name=topic_name: self.writer.write(
-                        topic_name, serialize_message(msg), self.get_clock().now().nanoseconds
-                    ),
+                    self._make_write_callback(topic_name),
                     qos_profile,
                 )
             )
 
         self.get_logger().info(f"Recording started for task '{self.data_name}' with topics: {self.topics_and_types.keys()} at {task_folder_bag}")
+
+    def _make_write_callback(self, topic_name):
+        """Write every message of the topic to the bag, or at most max_rate_hz[topic] per second."""
+        rate = float(self.max_rate_hz.get(topic_name, 0) or 0)
+        period_ns = int(1e9 / rate) if rate > 0 else 0
+        last = [0]
+
+        def callback(msg):
+            now = self.get_clock().now().nanoseconds
+            if period_ns and now - last[0] < period_ns:
+                return
+            last[0] = now
+            self.writer.write(topic_name, serialize_message(msg), now)
+
+        return callback
 
     def stop_recording(self):
         if self.writer:

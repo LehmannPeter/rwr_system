@@ -11,6 +11,17 @@ from sensor_msgs.msg import Image
 from ingress.msg import CameraIntrinsics
 from cv_bridge import CvBridge  
 bridge = CvBridge()
+try:  # only needed for recordings that contain the Franka robot state
+    from franka_msgs.msg import FrankaState
+except ImportError:
+    FrankaState = None
+
+# Fields of the Franka robot state that are saved, as <field>: <HDF5 group>. Each group holds
+# one array per message, like the Float32MultiArray topics.
+FRANKA_STATE_FIELDS = {
+    "q": "/right/arm/joint_position",      # 7 joint angles, rad
+    "tau_j": "/right/arm/joint_torque",    # 7 measured joint torques, Nm
+}
 
 def convert_to_h5(input_bag_path: str, output_h5_path: str):
     """Convert the rosbag to HDF5 format."""
@@ -40,8 +51,8 @@ def convert_to_h5(input_bag_path: str, output_h5_path: str):
             msg_type_str = topic_type_map[topic_name]
             # Accept standard ROS type names and legacy bags containing only class names.
             msg_class = {cls.__name__: cls for cls in (
-                Image, PoseStamped, Float32MultiArray, String, CameraIntrinsics
-            )}.get(msg_type_str.rsplit("/", 1)[-1])
+                Image, PoseStamped, Float32MultiArray, String, CameraIntrinsics, FrankaState
+            ) if cls is not None}.get(msg_type_str.rsplit("/", 1)[-1])
 
             if msg_class is None:
                 print(f"Unsupported message type for topic '{topic_name}': {msg_type_str}")
@@ -49,6 +60,15 @@ def convert_to_h5(input_bag_path: str, output_h5_path: str):
 
             # Deserialize message
             msg = deserialize_message(data, msg_class)
+
+            if FrankaState is not None and isinstance(msg, FrankaState):
+                # The robot state is not stored under its topic name: each saved field gets its own group.
+                for field, group in FRANKA_STATE_FIELDS.items():
+                    if group not in h5_file:
+                        h5_file.create_group(group)
+                        print(f"Creating group '{group}' from topic '{topic_name}'")
+                    h5_file[group].create_dataset(f"{timestamp}", data=np.asarray(getattr(msg, field), dtype=np.float32))
+                continue
 
             # Create HDF5 group if it does not exist
             if topic_name not in h5_file:

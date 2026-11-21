@@ -204,10 +204,11 @@ def _sync_to_temp(keys_and_topics, topics_and_types, input_file, output_file, sa
             os.remove(tmp_file)
 
 
-def process_folder(keys_and_topics, topics_and_types, input_folder, sampling_frequency, compress, resize_to, max_parallel=8, skip_existing=False):
+def process_folder(keys_and_topics, topics_and_types, input_folder, sampling_frequency, compress, resize_to, max_parallel=8, skip_existing=False, output_folder=None):
     """
     Process all HDF5 files in the given folder in parallel (up to max_parallel at a time)
-    and save the processed files with a running index in a new folder named <input_folder>_processed.
+    and save the processed files under the same file names in `output_folder`
+    (default: a sibling folder named <input_folder>_processed_<freq>hz[_lzf]).
     
     Parameters:
         input_folder (str): Path to the folder containing input HDF5 files.
@@ -223,10 +224,11 @@ def process_folder(keys_and_topics, topics_and_types, input_folder, sampling_fre
         return
 
     # Create the output folder
-    output_folder = os.path.join(os.path.dirname(input_folder), 
-                                 os.path.basename(input_folder) + "_processed" + f"_{int(sampling_frequency)}hz")
-    if compress:
-        output_folder += "_lzf"
+    if not output_folder:
+        output_folder = os.path.join(os.path.dirname(input_folder),
+                                     os.path.basename(input_folder) + "_processed" + f"_{int(sampling_frequency)}hz")
+        if compress:
+            output_folder += "_lzf"
     os.makedirs(output_folder, exist_ok=True)
     print(f"Output folder created: {output_folder}")
 
@@ -271,6 +273,7 @@ def main():
     )
     parser.add_argument("--skip_existing", action="store_true", help="Only process recordings that have no processed file yet.")
     parser.add_argument("--max_parallel", type=int, default=8, help="How many recordings to process at the same time.")
+    parser.add_argument("--output_folder", type=str, default="", help="Where to write the processed files. Default: <input_folder>_processed_<freq>hz[_lzf] next to the input folder.")
     args = parser.parse_args()
 
     if args.cfg_file == "":
@@ -281,7 +284,8 @@ def main():
     keys_and_topics = cfgyaml['keys_and_topics']
     topics_and_types = cfgyaml['topics_and_types']
     process_folder(keys_and_topics, topics_and_types, args.input_folder, args.sampling_freq, args.compress, args.resize_to,
-                   max_parallel=args.max_parallel, skip_existing=args.skip_existing)
+                   max_parallel=args.max_parallel, skip_existing=args.skip_existing,
+                   output_folder=os.path.abspath(args.output_folder) if args.output_folder else None)
 
 if __name__ == "__main__":
     main()

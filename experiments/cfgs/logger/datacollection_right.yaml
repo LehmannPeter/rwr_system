@@ -7,6 +7,17 @@ topics_and_types:
   /oakd_wrist_view/color: sensor_msgs.msg.Image
   /oakd_front_view/intrinsics: ingress.msg.CameraIntrinsics
   /oakd_wrist_view/intrinsics: ingress.msg.CameraIntrinsics
+  # Diagnostics, kept in the raw recordings only (no entry in keys_and_topics below, so the
+  # synchronised files and the training data are unchanged).
+  /right/hand/motor_current: std_msgs.msg.Float32MultiArray        # mA, one value per hand motor
+  /right/hand/motor_temperature: std_msgs.msg.Float32MultiArray    # deg C, one value per hand motor
+  # Franka robot state: saved as /right/arm/joint_position (7 angles, rad) and
+  # /right/arm/joint_torque (7 torques, Nm), see FRANKA_STATE_FIELDS in bag2h5_converter.py.
+  /paco/franka_robot_state_broadcaster/robot_state: franka_msgs.msg.FrankaState
+
+# Topics that are recorded at most this often (Hz); faster messages are dropped.
+max_rate_hz:
+  /paco/franka_robot_state_broadcaster/robot_state: 100
 
 keys_and_topics:
   observations/images/{0}/color:

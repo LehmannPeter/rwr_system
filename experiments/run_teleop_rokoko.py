@@ -37,6 +37,11 @@ class RokokoCoilDemo(Node):
         # Optional station correction for the center pose: {"yaw_deg": <rotation about the
         # vertical axis, positive = anticlockwise seen from above>}. Read at every move.
         self.declare_parameter("center_adjust_file", "~/.ros/teleop_center_adjust_{chirality}.json")
+        # Optional station correction for how the Rokoko coil frame is turned against the robot
+        # base: {"yaw_deg": <rotation about the vertical axis, positive = anticlockwise seen from
+        # above>}. 180 reverses sideways and forward/back together. Read at start and at every
+        # resume (never while teleop runs); without the file the built-in coil orientation is used.
+        self.declare_parameter("coil_adjust_file", "~/.ros/teleop_coil_adjust_{chirality}.json")
         # move2init and move2center travel smoothly at these speeds instead of jumping.
         self.declare_parameter("move_speed", 0.10)       # m/s
         self.declare_parameter("move_rot_speed", 0.5)    # rad/s
@@ -73,6 +78,9 @@ class RokokoCoilDemo(Node):
         )
 
         self.chirality = chirality
+        self.R_W_bCP_builtin = self.X_W_bCP[:3,:3].copy()
+        self.coil_yaw_deg = 0.0
+        self.apply_coil_yaw()
 
         self.X_W_fEE_d = None
         self.X_W_fEE_init = None
@@ -287,6 +295,34 @@ class RokokoCoilDemo(Node):
         response.success = True
         return response
 
+    def load_coil_yaw(self):
+        """Yaw correction of the coil frame in degrees from the station file, 0.0 without a valid file."""
+        adjust_file = os.path.expanduser(
+            str(self.get_parameter("coil_adjust_file").value).replace("{chirality}", str(self.chirality))
+        )
+        try:
+            with open(adjust_file) as f:
+                yaw_deg = float(json.load(f).get("yaw_deg", 0.0))
+            if not np.isfinite(yaw_deg) or abs(yaw_deg) > 180.0:
+                raise ValueError("yaw_deg must be within +-180 degrees")
+            return yaw_deg
+        except FileNotFoundError:
+            return 0.0
+        except Exception as exc:
+            self.get_logger().warn(f"Ignoring {adjust_file}: {exc}")
+            return 0.0
+
+    def apply_coil_yaw(self):
+        """Turn the coil frame by the station file's yaw. Called at start and at every resume,
+        so a change takes effect at the next resume and never while teleop runs."""
+        yaw_deg = self.load_coil_yaw()
+        X_W_bCP = self.X_W_bCP.copy()
+        X_W_bCP[:3,:3] = Rotation.from_euler("z", yaw_deg, degrees=True).as_matrix() @ self.R_W_bCP_builtin
+        self.X_W_bCP = X_W_bCP
+        if yaw_deg != self.coil_yaw_deg:
+            self.get_logger().info(f"Coil frame turned by {yaw_deg:.1f} deg about the vertical axis")
+        self.coil_yaw_deg = yaw_deg
+
     def load_start_pose(self):
         """Saved start pose as a 4x4 transform, or None if no valid file exists."""
         try:
@@ -422,6 +458,7 @@ class RokokoCoilDemo(Node):
 
     def init_glove_pose(self):
 
+        self.apply_coil_yaw()
         self.X_W_fEE_init = deepcopy(self.X_W_fEE)
         if self.X_W_fEE_init is not None:
             self.Xr_W_fEE_init = np.eye(4)

@@ -1,27 +1,31 @@
 # MANO -> URDF alignment adjustments for orcahand_v2 (right hand).
-# Started from the orcahand_v1b values. Tune them for your hand with retargeter_config_helper.launch.py,
-# or fit them to collected data with src/retargeter/retargeter_calibration.py.
+# 2026-11-21: fit4. Started from fit2 (fingers fitted offline on flat, spread, fist, tabletop and
+# hook poses of a teleop-test recording; thumb refitted on its pinch poses), then the finger
+# abduction (rotation z, scale x of index/middle/ring/pinky) refitted on 13 hand-posed
+# calibration pairs. Use together with virtual_coupling switched off in retargeter_cfgs_orcahand_v2.yaml.
+# fit2 values: ~/rwr_humble_ws/retargeter_fits/mano_adjustment_live_fit2_backup.yaml
+# Values before 2026-11-21: ~/rwr_humble_ws/retargeter_backups/2026-11-21_before_tuning/ and git commit c2202cb.
 all:
-  translation : [0.0, 0.0, -0.01]
-  rotation : [0.2, 0.0, -0.1]
-  scale : [1.0, 0.7, 1.0]
+  translation : [-0.012, 0.0101, 0.0097]
+  rotation : [-0.0458, 0.2143, -0.1033]
+  scale : [0.7387, 0.7647, 0.6116]
 thumb:
-  translation : [0.0, 0.0, 0.0]
-  rotation : [0.0, 0.0, 0.0]
-  scale : [1.0, 1.0, 1.0]
+  translation : [0.0104, -0.0064, -0.0003]
+  rotation : [-0.0499, -0.2367, -0.3325]
+  scale : [1.1169, 0.9086, 1.6134]
 index:
-  translation : [0.0, 0.0, 0.0]
-  rotation : [0.0, 0.0, -0.3]
-  scale : [1.0, 1.0, 1.0]
+  translation : [0.0063, -0.0056, 0.0066]
+  rotation : [-0.1551, 0.0907, -0.1955]
+  scale : [0.9517, 1.1291, 0.99]
 middle:
-  translation : [0.0, 0.0, 0.0]
-  rotation : [0.0, 0.0, -0.3]
-  scale : [1.0, 1.0, 1.0]
+  translation : [0.0022, 0.0132, 0.0105]
+  rotation : [-0.2176, 0.1009, -0.0387]
+  scale : [0.7763, 0.9687, 0.8625]
 ring:
-  translation : [0.0, 0.0, 0.0]
-  rotation : [0.0, 0.0, -0.3]
-  scale : [1.0, 1.0, 1.0]
-pinky: 
-  translation : [0.0, 0.0, 0.0]
-  rotation : [0.0, 0.0, -0.3]
-  scale : [1.0, 1.0, 1.0]
+  translation : [-0.002, 0.0076, 0.0066]
+  rotation : [-0.1308, 0.042, -0.1796]
+  scale : [0.7866, 1.0571, 0.9467]
+pinky:
+  translation : [-0.0129, -0.0035, -0.0023]
+  rotation : [0.1466, 0.0471, 0.0161]
+  scale : [0.7863, 1.1093, 1.0543]

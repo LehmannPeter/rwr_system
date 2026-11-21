@@ -97,15 +97,18 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 6. **Record**:
    ```bash
    ros2 launch experiments record_demonstration.launch.py \
-     storage_base_path:="$HOME/<ws>/data/raw" dataset_name:=cube_sorting_red
+     storage_base_path:="$HOME/<ws>/data/raw" dataset_name:=s03_2026-11-24_opA
    ```
+   `dataset_name` is the session name: `s<nn>_<date>_<operator>`.
    A `keyboard_runner` terminal prompts through: move to init, start teleop, start recording, stop, save or discard. Raw files land in `<storage_base_path>/<dataset_name>/<timestamp>.h5`. Stop the teleop launch before starting this one; both start their own controller, retargeter and Rokoko ingress.
 7. **Synchronise**:
    ```bash
-   ros2 run logger syncronize_data.py <raw_folder> --sampling_freq 10 --compress \
+   ros2 run logger syncronize_data.py data/raw/<session> --sampling_freq 10 --compress \
+     --output_folder data/processed/<session>_10hz \
      --cfg_file "$(ros2 pkg prefix --share experiments)/cfgs/logger/datacollection_right.yaml"
    ```
-   Output goes to a sibling folder `<dataset_name>_processed_10hz_lzf/` as `0000.h5`, `0001.h5`, ... The script name really is spelled `syncronize_data.py`.
+   Processed files keep the raw file names. Without `--output_folder` the output goes to a sibling folder `<raw_folder>_processed_10hz_lzf/`. The script name really is spelled `syncronize_data.py`.
+   The data layout (`data/raw`, `data/processed`, `data/datasets`, `manifest.csv`), dataset versions and the Hugging Face upload are described in `rwr_il/CLAUDE.md`, section "Data organisation and transfer"; the tool is `rwr_il/scripts/rwr_data.py`. APE (`~/Projects/ape_ui`) records, processes, labels and uploads in this layout.
 8. **Inspect**: `experiments/scripts/inspect_demonstration.py`, `plot_trajectories.py`, `visualize_videos.py`, or the myHDF5 website.
 9. **Train** in `rwr_il` (see that repo's `CLAUDE.md`).
 10. **Deploy**:
@@ -139,6 +142,8 @@ Processed HDF5 layout (one file per demonstration, all arrays resampled to a com
 | `right/actions_arm` | `/right/arm/end_effector_pose_cmd` | 7 |
 | `right/actions_hand` | `/right/hand/policy_output` | 17 |
 | `timestamps` | | ns |
+
+Raw recordings also hold diagnostics that are not copied into the synchronised files (no entry in `keys_and_topics`, so training is unaffected): `/right/hand/motor_current` (mA) and `/right/hand/motor_temperature` (°C), one value per hand motor, and from the Franka robot state `/right/arm/joint_position` (7 angles, rad) and `/right/arm/joint_torque` (7 torques, Nm). The robot state topic is recorded at most 100 times per second (`max_rate_hz` in `datacollection_right.yaml`); which of its fields are saved is set by `FRANKA_STATE_FIELDS` in `src/logger/bag2h5_converter.py`. Recordings from before 2026-11-21 16:00 do not have these groups. The sync script prints "No keys found" for the two hand topics; that is expected.
 
 Images are sampled by nearest timestamp; poses are interpolated linearly with slerp for rotation; float arrays linearly. Synchronisation uses ROS receive times over the interval shared by all streams. It does not correct sensor latency.
 

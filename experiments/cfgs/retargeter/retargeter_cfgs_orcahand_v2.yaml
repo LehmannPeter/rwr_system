@@ -21,13 +21,16 @@ loss_func_cfg:
   # with an open hand the knuckles of middle, ring and pinky sat on their -25 deg stop
   # (constant motor current, overheating). Added 2026-11-19; tested offline for weights
   # 0.05 to 2.0 with nearly identical results. Comment this block out to switch it off.
-  virtual_coupling:
-    weight: 1.0
-    kwargs:
-      index:  [0.2, [[1.0, index_mcp],  [-1.0, index_pip]]]
-      middle: [0.2, [[1.0, middle_mcp], [-1.0, middle_pip]]]
-      ring:   [0.2, [[1.0, ring_mcp],   [-1.0, ring_pip]]]
-      pinky:  [0.2, [[1.0, pinky_mcp],  [-1.0, pinky_pip]]]
+  # 2026-11-21: switched off together with the refitted MANO adjustments, which fix the
+  # open-hand claw this block was covering for; with it on, tabletop and hook poses are
+  # impossible (mcp and pip forced equal). Uncomment to switch it back on.
+  # virtual_coupling:
+  #   weight: 1.0
+  #   kwargs:
+  #     index:  [0.2, [[1.0, index_mcp],  [-1.0, index_pip]]]
+  #     middle: [0.2, [[1.0, middle_mcp], [-1.0, middle_pip]]]
+  #     ring:   [0.2, [[1.0, ring_mcp],   [-1.0, ring_pip]]]
+  #     pinky:  [0.2, [[1.0, pinky_mcp],  [-1.0, pinky_pip]]]
   # Earlier, fuller version (with thumb entries), kept for reference:
   # virtual_coupling:
   #   weight: 1.0

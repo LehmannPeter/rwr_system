@@ -2,6 +2,7 @@
 
 import json
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +51,12 @@ class RetargeterCalibrationCollector(Node):
         )
         self.create_subscription(
             Float32MultiArray, self.joints_topic, self.joints_cb, 10
+        )
+        # hand commands, to know when the retargeter has really stopped
+        self.command_topic = f"/{self.hand_chirality}/hand/policy_output"
+        self.last_command_time = time.monotonic()
+        self.create_subscription(
+            Float32MultiArray, self.command_topic, self.command_cb, 10
         )
 
         # Service client to enable/disable the retargeter.
@@ -129,6 +136,20 @@ class RetargeterCalibrationCollector(Node):
 
         future.add_done_callback(_done_cb)
 
+    def command_cb(self, msg: Float32MultiArray) -> None:
+        self.last_command_time = time.monotonic()
+
+    def _wait_for_commands_to_stop(self, quiet_s: float = 0.5, timeout_s: float = 3.0) -> None:
+        start = time.monotonic()
+        while time.monotonic() - start < timeout_s:
+            if time.monotonic() - self.last_command_time > quiet_s:
+                return
+            time.sleep(0.05)
+        self.get_logger().warn(
+            f"Hand commands still arriving on {self.command_topic} after {timeout_s:g} s; "
+            "switching torque off anyway. If the hand stays stiff, another node is commanding it."
+        )
+
     def toggle_pause(self) -> None:
         """
         Pause/resume retargeter and enable/disable torque on the hand.
@@ -143,6 +164,10 @@ class RetargeterCalibrationCollector(Node):
         if not self.paused:
             self.get_logger().info("Pausing retargeter and disabling torque...")
             self._set_retargeter_enabled(False)
+            # Wait until no hand command has arrived for a while before switching torque off:
+            # a position command that reaches the hand after the torque-off switches the
+            # servos back on, so the hand would stay stiff.
+            self._wait_for_commands_to_stop()
             self._set_torque_enabled(False)
             self.paused = True
         else:

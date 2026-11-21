@@ -81,6 +81,25 @@ def inspect(path, cameras, output=None, max_gap=0.5):
     return report
 
 
+def _hand_joint_names():
+    """Joint names in the order of the hand's joint vector, from the ORCA hand config; empty if not found."""
+    here = Path(__file__).resolve()
+    candidates = [parent / "src/hand_control/orca/configs/orcahand_v2/right/config.yaml" for parent in here.parents]
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        candidates.insert(0, Path(get_package_share_directory("hand_control")) / "orca/configs/orcahand_v2/right/config.yaml")
+    except Exception:
+        pass
+    for path in candidates:
+        if path.is_file():
+            try:
+                import yaml
+                return [str(j) for j in yaml.safe_load(path.read_text())["joint_ids"]]
+            except Exception:
+                return []
+    return []
+
+
 def _preview(streams, cameras, begin, end, output):
     import cv2
     import matplotlib
@@ -102,16 +121,35 @@ def _preview(streams, cameras, begin, end, output):
             writer.write(np.concatenate(frames, axis=1))
     finally:
         writer.release()
-    fig, axes = plt.subplots(2, 1, figsize=(10, 6))
+    from matplotlib.lines import Line2D
+
+    # One colour per coordinate or joint; solid = measured, dashed = commanded.
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7))
+    joints = _hand_joint_names()
+    palettes = (["tab:red", "tab:green", "tab:blue"], [plt.get_cmap("tab20")(i) for i in range(20)])
+    named = (set(), set())
     for topic, (times, get) in streams.items():
         if topic in MOTION:
             values = np.array([get(i) for i in range(len(times))])
             arm = MOTION[topic][1] == 7
-            axes[0 if arm else 1].plot(times - begin, values[:, :3] if arm else values,
-                                      linestyle="--" if "cmd" in topic or "policy_output" in topic else "-")
-    axes[0].set_ylabel("Arm xyz (m)")
+            row = 0 if arm else 1
+            command = "cmd" in topic or "policy_output" in topic
+            for k in range(3 if arm else values.shape[1]):
+                name = "xyz"[k] if arm else (joints[k] if k < len(joints) else f"joint {k}")
+                axes[row].plot(times - begin, values[:, k], color=palettes[row][k % len(palettes[row])],
+                               linestyle="--" if command else "-", linewidth=1.2,
+                               label=None if name in named[row] else name)
+                named[row].add(name)
+    styles = [Line2D([], [], color="black", linestyle="-", label="measured"),
+              Line2D([], [], color="black", linestyle="--", label="commanded")]
+    for row, ax in enumerate(axes):
+        handles, _ = ax.get_legend_handles_labels()
+        # the legend shows the colour of each name; the two black entries explain the line style
+        ax.legend(handles=[Line2D([], [], color=h.get_color(), label=h.get_label()) for h in handles] + styles,
+                  loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8, ncol=1 if row == 0 else 2, frameon=False)
+    axes[0].set_ylabel("Arm position (m)")
     axes[1].set_ylabel("Hand joints (rad)")
-    axes[1].set_xlabel("Seconds from shared interval start; dashed = command")
+    axes[1].set_xlabel("Seconds")
     fig.tight_layout()
     fig.savefig(output / "trajectory.png", dpi=130)
     plt.close(fig)
