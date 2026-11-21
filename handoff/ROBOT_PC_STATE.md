@@ -9,7 +9,7 @@ Last updated: 2026-11-21
 | Item | Value |
 |---|---|
 | OS, GPU, free disk | Ubuntu 24.04.3 LTS (kernel 7.0.0-43); NVIDIA GeForce RTX 5060 Laptop GPU, 8 GB; 442 GB free of 937 GB |
-| ROS workspace path | `~/rwr_humble_ws` (pixi, ROS 2 Humble, Python 3.12). `src/rwr_system` is a symlink to `~/Projects/rwr_system`. The teleop and recordings are normally started from the `ape_ui` web app (`~/Projects/ape_ui`), which runs ROS in domain 7 with CycloneDDS |
+| ROS workspace path | `~/rwr_humble_ws` (pixi, ROS 2 Humble, Python 3.12). `src/rwr_system` is a symlink to `~/Projects/rwr_system`. The teleop and recordings are normally started from the `ape_ui` web app (since 2026-11-21 in this repo: `~/Projects/rwr_system/ape_ui`; `~/Projects/ape_ui` is a symlink to it; the robot's address is in the git-ignored `ape_ui/static/local/station.json`), which runs ROS in domain 7 with CycloneDDS |
 | `rwr_system` commit, branch, uncommitted changes | `9218688`, `main`, pushed; nothing uncommitted |
 | `rwr_il` commit, importable in the ROS environment (yes/no) | `7cfc042` (`main`); yes, `from srl_il.export.policy import get_policy_from_ckpt` works in the pixi env (warns that pytorch3d is not installed) |
 | Folder where recordings are stored | Since 2026-11-21: `~/rwr_humble_ws/data/raw/<session>/`, processed in `data/processed/<session>_10hz/`, per-episode labels in `data/manifest.csv`, dataset versions in `data/datasets/<version>/` (set by `ape_ui`; tool: `rwr_il/scripts/rwr_data.py`, described in `rwr_il/CLAUDE.md`). Session names: `s<nn>_<date>_<operator>` |
