@@ -1,5 +1,7 @@
 #!/bin/env python3
 
+import json
+import os
 import numpy as np
 import time
 from copy import deepcopy
@@ -10,8 +12,8 @@ from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import Point, TransformStamped, Vector3, Quaternion, PoseStamped
 from tf2_ros import TransformBroadcaster
 
-from scipy.spatial.transform import Rotation
-from std_srvs.srv import Trigger
+from scipy.spatial.transform import Rotation, Slerp
+from std_srvs.srv import SetBool, Trigger
 from faive_system.src.common.transformation_utils import rigid_transform, complete_rotation_matrix
 from faive_system.src.common.enums import TeleopState, HandChirality
 
@@ -24,6 +26,27 @@ class RokokoCoilDemo(Node):
         # interactive=False keeps the node purely service driven: no stdin prompts, so another
         # node (e.g. the HIL policy node) can own the terminal and call pause/resume itself.
         self.declare_parameter("interactive", True)
+        # Arm position scale used by /franka_teleop/<chirality>/set_accurate_mode (SetBool):
+        # true -> accurate scale, false -> 1.0. Both are limited to 0.2 .. 1.0.
+        self.declare_parameter("accurate_pos_mapping_scale", 0.6)
+        # Station specific start pose for move2init, saved by
+        # /franka_teleop/<chirality>/set_start_pose_here. Without the file, the built-in pose is used.
+        self.declare_parameter("start_pose_file", "~/.ros/teleop_start_pose_{chirality}.json")
+        # Fixed "center" pose for /franka_teleop/<chirality>/move2center (world frame, metres; palm down).
+        self.declare_parameter("center_position", [0.45, 0.0, 0.40])
+        # Optional station correction for the center pose: {"yaw_deg": <rotation about the
+        # vertical axis, positive = anticlockwise seen from above>}. Read at every move.
+        self.declare_parameter("center_adjust_file", "~/.ros/teleop_center_adjust_{chirality}.json")
+        # move2init and move2center travel smoothly at these speeds instead of jumping.
+        self.declare_parameter("move_speed", 0.10)       # m/s
+        self.declare_parameter("move_rot_speed", 0.5)    # rad/s
+        # After a smooth move the arm tends to stop several degrees short in orientation
+        # (soft orientation control against joint friction). The settle phase nudges the
+        # commanded orientation by the measured error until the hand is within tolerance.
+        self.declare_parameter("move_settle_time", 4.0)      # s, longest settle phase; 0 switches it off
+        self.declare_parameter("move_settle_gain", 1.5)      # 1/s
+        self.declare_parameter("move_settle_max_deg", 15.0)  # largest total correction
+        self.declare_parameter("move_settle_tol_deg", 1.0)
 
         self.enable_left = self.get_parameter("enable_left").value
         self.enable_right = self.get_parameter("enable_right").value
@@ -77,6 +100,7 @@ class RokokoCoilDemo(Node):
         # Transition from unready to paused is to move the robot to default position
         # Transition from paused to running requires the calibration of the hand
         self._state = TeleopState.UNREADY
+        self._move = None  # smooth move in progress (only while paused)
         self.DT = 0.02
         self.timer = self.create_timer(self.DT, self.main_loop_cb)
 
@@ -95,6 +119,25 @@ class RokokoCoilDemo(Node):
             Trigger,
             f"/franka_teleop/{self.chirality}/resume",  # service name
             self.resume_callback
+        )
+
+        self.start_pose_file = os.path.expanduser(
+            str(self.get_parameter("start_pose_file").value).replace("{chirality}", str(self.chirality))
+        )
+        self.move2center_service = self.create_service(
+            Trigger,
+            f"/franka_teleop/{self.chirality}/move2center",
+            self.move2center_callback
+        )
+        self.set_start_pose_service = self.create_service(
+            Trigger,
+            f"/franka_teleop/{self.chirality}/set_start_pose_here",
+            self.set_start_pose_here_callback
+        )
+        self.accurate_mode_service = self.create_service(
+            SetBool,
+            f"/franka_teleop/{self.chirality}/set_accurate_mode",
+            self.set_accurate_mode_callback
         )
 
         self._calc_translation_func = self.calc_translation_ScaledPosMapping
@@ -119,19 +162,109 @@ class RokokoCoilDemo(Node):
             start_target_rot = complete_rotation_matrix(x=[1, 0, 0], z=[0, 0, -1])
 
         start_target = rigid_transform(start_target_pos, Rotation.from_matrix(start_target_rot).as_quat())
-        self.publish_target_pose(start_target)
+        saved = self.load_start_pose()
+        if saved is not None:
+            start_target = saved
+        duration = self.start_smooth_move(start_target)
         self.X_W_fEE_init = deepcopy(start_target)
         self.Xr_W_fEE_init = np.eye(4)
         self.Xr_W_fEE_init[:3,:3] = self.X_W_fEE_init[:3,:3]
         self.Xt_W_fEE_init = rigid_transform(self.X_W_fEE_init[:3,3], [0,0,0,1])
 
         response.success = True
+        response.message = f"{duration:.1f}"
         return response
+
+    def move2center_callback(self, request, response):
+        """Move smoothly to the fixed center pose (parameter center_position, palm down)."""
+        if self._state != TeleopState.PAUSED or self.X_W_fEE is None:
+            response.success = False
+            response.message = "Only possible while teleop is paused and the robot pose is known"
+            return response
+        pos = [float(v) for v in self.get_parameter("center_position").value]
+        rot = complete_rotation_matrix(x=[1, 0, 0], z=[0, 0, -1])
+        yaw_deg = 0.0
+        adjust_file = os.path.expanduser(
+            str(self.get_parameter("center_adjust_file").value).replace("{chirality}", str(self.chirality))
+        )
+        try:
+            with open(adjust_file) as f:
+                yaw_deg = float(json.load(f).get("yaw_deg", 0.0))
+            if not np.isfinite(yaw_deg) or abs(yaw_deg) > 45.0:
+                raise ValueError("yaw_deg must be within +-45 degrees")
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            self.get_logger().warn(f"Ignoring {adjust_file}: {exc}")
+            yaw_deg = 0.0
+        rot = Rotation.from_euler("z", yaw_deg, degrees=True).as_matrix() @ rot
+        duration = self.start_smooth_move(rigid_transform(pos, Rotation.from_matrix(rot).as_quat()))
+        response.success = True
+        response.message = f"{duration:.1f}"
+        return response
+
+    def start_smooth_move(self, goal):
+        """Begin a smooth move from the measured pose to goal (4x4). Returns its duration in s.
+        The targets are published by the main loop while paused; pause or resume cancels it."""
+        start = deepcopy(self.X_W_fEE)
+        dist = float(np.linalg.norm(goal[:3, 3] - start[:3, 3]))
+        rots = Rotation.from_matrix(np.stack([start[:3, :3], goal[:3, :3]]))
+        angle = float((rots[0].inv() * rots[1]).magnitude())
+        speed = max(float(self.get_parameter("move_speed").value), 0.01)
+        rot_speed = max(float(self.get_parameter("move_rot_speed").value), 0.05)
+        duration = max(dist / speed, angle / rot_speed, 1.0)
+        settle = max(float(self.get_parameter("move_settle_time").value), 0.0)
+        self._move = {
+            "start": start[:3, 3].copy(), "goal": goal[:3, 3].copy(), "slerp": Slerp([0.0, 1.0], rots),
+            "t0": time.monotonic(), "T": duration,
+            "goal_rot": rots[1], "settle": settle, "corr": np.zeros(3), "ok_time": 0.0,
+        }
+        self.get_logger().info(f"Smooth move: {dist*100:.0f} cm, {np.degrees(angle):.0f} deg, {duration:.1f} s (+ up to {settle:.0f} s settling)")
+        return duration + settle
+
+    def step_smooth_move(self):
+        m = self._move
+        if m is None:
+            return
+        elapsed = time.monotonic() - m["t0"]
+        X = np.eye(4)
+        if elapsed < m["T"]:
+            a = elapsed / m["T"]
+            s = a * a * (3.0 - 2.0 * a)  # ease in and out
+            X[:3, 3] = (1.0 - s) * m["start"] + s * m["goal"]
+            X[:3, :3] = m["slerp"](s).as_matrix()
+            self.publish_target_pose(X)
+            return
+        # Settle phase: hold the goal position and correct the commanded orientation by the
+        # measured orientation error, so the hand ends where it should instead of stopping short.
+        X[:3, 3] = m["goal"]
+        if m["settle"] <= 0.0 or self.X_W_fEE is None:
+            X[:3, :3] = m["goal_rot"].as_matrix()
+            self.publish_target_pose(X)
+            self._move = None
+            return
+        err = (m["goal_rot"] * Rotation.from_matrix(self.X_W_fEE[:3, :3]).inv()).as_rotvec()  # measured -> goal, world axes
+        err_deg = float(np.degrees(np.linalg.norm(err)))
+        m["ok_time"] = m["ok_time"] + self.DT if err_deg < float(self.get_parameter("move_settle_tol_deg").value) else 0.0
+        corr = m["corr"] + float(self.get_parameter("move_settle_gain").value) * err * self.DT
+        limit = np.radians(float(self.get_parameter("move_settle_max_deg").value))
+        norm = float(np.linalg.norm(corr))
+        if norm > limit:
+            corr = corr * (limit / norm)
+        m["corr"] = corr
+        X[:3, :3] = (Rotation.from_rotvec(corr) * m["goal_rot"]).as_matrix()
+        self.publish_target_pose(X)
+        if m["ok_time"] >= 0.4 or elapsed > m["T"] + m["settle"]:
+            self.get_logger().info(
+                f"Move finished: orientation {err_deg:.1f} deg from the goal, correction used {np.degrees(np.linalg.norm(corr)):.1f} deg"
+            )
+            self._move = None
     
     def pause_callback(self, request, response):
         if self._state == TeleopState.UNREADY:
             response.success = False
             return response
+        self._move = None  # pausing also stops a smooth move: the arm holds its last target
         self._state = TeleopState.PAUSED
         response.success = True
         return response
@@ -148,9 +281,64 @@ class RokokoCoilDemo(Node):
             response.success = False
             return response
 
+        self._move = None
         self.init_glove_pose()
         self._state = TeleopState.RUNNING
         response.success = True
+        return response
+
+    def load_start_pose(self):
+        """Saved start pose as a 4x4 transform, or None if no valid file exists."""
+        try:
+            with open(self.start_pose_file) as f:
+                data = json.load(f)
+            pos = [float(v) for v in data["position"]]
+            quat = [float(v) for v in data["quat_xyzw"]]
+            if len(pos) != 3 or len(quat) != 4 or not np.all(np.isfinite(pos + quat)):
+                raise ValueError("bad start pose")
+            return rigid_transform(pos, quat)
+        except FileNotFoundError:
+            return None
+        except Exception as exc:
+            self.get_logger().warn(f"Ignoring start pose file {self.start_pose_file}: {exc}")
+            return None
+
+    def set_start_pose_here_callback(self, request, response):
+        """Save the arm's current pose as the start pose used by move2init."""
+        if self.X_W_fEE is None:
+            response.success = False
+            response.message = "No robot pose received yet"
+            return response
+        X = deepcopy(self.X_W_fEE)
+        data = {
+            "position": [float(v) for v in X[:3, 3]],
+            "quat_xyzw": [float(v) for v in Rotation.from_matrix(X[:3, :3]).as_quat()],
+        }
+        try:
+            os.makedirs(os.path.dirname(self.start_pose_file), exist_ok=True)
+            with open(self.start_pose_file, "w") as f:
+                json.dump(data, f, indent=2)
+        except OSError as exc:
+            response.success = False
+            response.message = f"Could not write {self.start_pose_file}: {exc}"
+            return response
+        self.get_logger().info(f"Start pose saved to {self.start_pose_file}: {data['position']}")
+        response.success = True
+        response.message = self.start_pose_file
+        return response
+
+    def set_accurate_mode_callback(self, request, response):
+        """Switch the arm position scale. Only while teleop is not running, so the target
+        never jumps: the next resume re-captures the glove and arm poses."""
+        if self._state == TeleopState.RUNNING:
+            response.success = False
+            response.message = "Pause teleop before changing the motion scale"
+            return response
+        scale = float(self.get_parameter("accurate_pos_mapping_scale").value) if request.data else 1.0
+        self._pos_mapping_scale = min(max(scale, 0.2), 1.0)
+        self.get_logger().info(f"Arm position scale set to {self._pos_mapping_scale:.2f}")
+        response.success = True
+        response.message = f"{self._pos_mapping_scale:.2f}"
         return response
 
     def arm_pose_callback(self, msg: PoseStamped):
@@ -194,7 +382,7 @@ class RokokoCoilDemo(Node):
                 self.Xt_W_fEE_init = rigid_transform(self.X_W_fEE_init[:3,3], [0,0,0,1])
                 self._state = TeleopState.PAUSED
         elif self._state == TeleopState.PAUSED: # paused
-            pass
+            self.step_smooth_move()
         elif self._state == TeleopState.RUNNING:
             X_W_fEE_d = self.compute_robot_target()
             self.publish_target_pose(X_W_fEE_d)
