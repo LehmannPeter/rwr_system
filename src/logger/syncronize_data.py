@@ -193,7 +193,18 @@ def sample_and_sync_h5(keys_and_topics, topics_and_types, input_h5_path, output_
 
 import concurrent.futures
 
-def process_folder(keys_and_topics, topics_and_types, input_folder, sampling_frequency, compress, resize_to, max_parallel=8):
+def _sync_to_temp(keys_and_topics, topics_and_types, input_file, output_file, sampling_frequency, compress, resize_to):
+    """Write to a temporary name first, so an interrupted run never leaves a half-written output."""
+    tmp_file = output_file + ".part"
+    try:
+        sample_and_sync_h5(keys_and_topics, topics_and_types, input_file, tmp_file, sampling_frequency, compress, resize_to)
+        os.replace(tmp_file, output_file)
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+def process_folder(keys_and_topics, topics_and_types, input_folder, sampling_frequency, compress, resize_to, max_parallel=8, skip_existing=False):
     """
     Process all HDF5 files in the given folder in parallel (up to max_parallel at a time)
     and save the processed files with a running index in a new folder named <input_folder>_processed.
@@ -223,10 +234,14 @@ def process_folder(keys_and_topics, topics_and_types, input_folder, sampling_fre
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_parallel) as executor:
         futures = []
         for idx, input_file in enumerate(h5_files):
-            output_file = os.path.join(output_folder, f"{idx:04d}.h5")
+            # keep the raw recording's timestamp name (e.g. 20261118_203512.h5)
+            output_file = os.path.join(output_folder, os.path.basename(input_file))
+            if skip_existing and os.path.exists(output_file):
+                print(f"Already processed, skipping: {input_file}")
+                continue
             print(f"Submitting file for processing: {input_file}")
             futures.append(
-                executor.submit(sample_and_sync_h5, keys_and_topics, topics_and_types, input_file, output_file, sampling_frequency, compress, resize_to)
+                executor.submit(_sync_to_temp, keys_and_topics, topics_and_types, input_file, output_file, sampling_frequency, compress, resize_to)
             )
         
         failures = []
@@ -254,6 +269,8 @@ def main():
         help="Target size of the image as a tuple of integers, e.g., '(width, height)'.",
         default=None
     )
+    parser.add_argument("--skip_existing", action="store_true", help="Only process recordings that have no processed file yet.")
+    parser.add_argument("--max_parallel", type=int, default=8, help="How many recordings to process at the same time.")
     args = parser.parse_args()
 
     if args.cfg_file == "":
@@ -263,7 +280,8 @@ def main():
     cfgyaml = yaml.safe_load(open(cfg_file, 'r'))
     keys_and_topics = cfgyaml['keys_and_topics']
     topics_and_types = cfgyaml['topics_and_types']
-    process_folder(keys_and_topics, topics_and_types, args.input_folder, args.sampling_freq, args.compress, args.resize_to)
+    process_folder(keys_and_topics, topics_and_types, args.input_folder, args.sampling_freq, args.compress, args.resize_to,
+                   max_parallel=args.max_parallel, skip_existing=args.skip_existing)
 
 if __name__ == "__main__":
     main()
