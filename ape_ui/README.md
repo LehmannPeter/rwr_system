@@ -103,8 +103,10 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
    - *Start live*: the policy's outputs go to the arm and the hand once *Start policy* is
      pressed. Both steps ask for confirmation.
    - *Start policy* / *Stop policy* (also the big button in the Operate card, with a timer),
-     *Reset policy state*, and in a live launch *Move arm to the demos' start pose* (the
-     inference node's `init_arm`, about 2 cm per second).
+     *Reset policy state*, and in a live launch *Move to center*: the same center pose
+     as *Move to center* in the Operate card, with the same rotation correction. The teleop
+     node is not running in a policy launch, so the inference node drives the arm
+     (`init_arm`, about 2 cm per second). The correction is read when the launch starts.
    - APE stops a live policy by itself when the robot leaves Ready (reflex, stop button,
      controller gone), so no targets pile up for the next controller start. Stop policy
      makes the arm hold its last target; it is not a safety stop.

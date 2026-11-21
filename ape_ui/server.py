@@ -381,12 +381,13 @@ class InferenceProc(PtyProcess):
     def __init__(self):
         super().__init__("inference")
         self.preview, self.run, self.ckpt, self.arm_init = True, None, None, False
+        self.init_pose = None      # where this launch's init_arm goes: the center pose as [x, y, z, qx, qy, qz, qw]
         self._clear()
 
     def _clear(self):
         self.policy_on = False     # between the node's "Policy started." and "Policy stopped."
         self.policy_since = None
-        self.init = ""             # arm move to the start pose: "", "moving", "done" or "failed: <why>"
+        self.init = ""             # arm move to the center pose: "", "moving", "done" or "failed: <why>"
         self.problems = []         # the first error lines of the log: they are the cause
         self.pauses, self.last_pause = 0, None   # "Policy output paused" warnings since the policy was started
         self.slow = 0
@@ -394,13 +395,14 @@ class InferenceProc(PtyProcess):
         self.marked = False        # recorded as "tried in preview"
         self._rest = ""
         self._seen_none = False    # no listener of a previous launch is left on the command topic
-        self._init_asked = None    # when APE asked for the move to the start pose, until the node confirms it
+        self._init_asked = None    # when APE asked for the move to the center pose, until the node confirms it
 
-    def begin(self, argv, run, ckpt, preview, arm_init):
+    def begin(self, argv, run, ckpt, preview, arm_init, init_pose=None):
         if self.running:
             raise RuntimeError("The policy launch is already running")
         self._clear()
         self.run, self.ckpt, self.preview, self.arm_init = run, ckpt, bool(preview), bool(arm_init)
+        self.init_pose = list(init_pose) if arm_init and init_pose else None
         self.start(argv, cwd=WORKSPACE, env=ROS_ENV)
 
     def on_output(self, data):
@@ -450,7 +452,8 @@ class InferenceProc(PtyProcess):
     def info(self):
         d = super().info()
         d.update(
-            preview=self.preview, run=self.run, ckpt=self.ckpt, arm_init=self.arm_init, policy_on=self.policy_on and self.running,
+            preview=self.preview, run=self.run, ckpt=self.ckpt, arm_init=self.arm_init,
+            init_target="center" if self.arm_init and self.init_pose else None, policy_on=self.policy_on and self.running,
             policy_for=(time.time() - self.policy_since) if self.policy_on and self.policy_since else None,
             init=self.init, problems=self.problems, pauses=self.pauses, slow=self.slow, note=self.note,
             last_pause={"age": time.time() - self.last_pause[0], "text": self.last_pause[1]} if self.last_pause else None,
@@ -1016,19 +1019,24 @@ class Operate:
             raise ControlError("No custom pose is saved for this station yet. Bring the arm to the pose you want and press Set.")
         return self._move("move2init", "custom pose", sp["position"], sp.get("quat"))
 
-    def move2center(self):
+    def center_pose(self):
+        """The center pose as [x, y, z, qx, qy, qz, qw] in the world frame, as the teleop node builds it for move2center."""
         from scipy.spatial.transform import Rotation
 
         # the node's center orientation: palm straight down (180 deg about x), then the turn about the vertical axis
         goal = Rotation.from_euler("z", self.center_yaw(), degrees=True) * Rotation.from_euler("x", 180, degrees=True)
-        return self._move("move2center", "center pose", CENTER_POS, [float(v) for v in goal.as_quat()])
+        return [float(v) for v in CENTER_POS] + [float(v) for v in goal.as_quat()]
+
+    def move2center(self):
+        return self._move("move2center", "center pose", CENTER_POS, self.center_pose()[3:])
 
     @staticmethod
     def center_yaw():
         import json
 
         try:
-            return float(json.loads(CENTER_ADJUST_FILE.read_text()).get("yaw_deg", 0.0))
+            yaw = float(json.loads(CENTER_ADJUST_FILE.read_text()).get("yaw_deg", 0.0))
+            return yaw if abs(yaw) <= 45.0 else 0.0   # the node ignores values outside +-45 (nan fails this test too)
         except Exception:
             return 0.0
 
@@ -1368,12 +1376,12 @@ def _relax_after_policy():
 
 
 def policy_command(action, override=False):
-    """Start, stop or reset the loaded policy, or move the arm to the demos' start pose."""
+    """Start, stop or reset the loaded policy, or move the arm to the center pose."""
     if action not in ("start", "stop", "reset", "init_arm"):
         raise ControlError("Unknown policy command.")
     if not inference.running:
         raise ControlError("Start the policy launch first.")
-    if action == "stop":   # always allowed; it also ends a move to the start pose
+    if action == "stop":   # always allowed; it also ends a move to the center pose
         monitor.policy_command("stop")
         if not inference.preview:
             threading.Thread(target=_relax_after_policy, daemon=True).start()
@@ -1381,7 +1389,7 @@ def policy_command(action, override=False):
     if not inference.node_ready():
         raise ControlError("The policy is still loading. Wait until the card says it is ready.")
     if inference.init == "moving":
-        raise ControlError("The arm is still moving to the start pose. Wait, or press Stop policy.")
+        raise ControlError("The arm is still moving to the center pose. Wait, or press Stop policy.")
     if inference.policy_on:
         raise ControlError("The policy is already running." if action == "start" else "Stop the policy first.")
     if action == "reset":
@@ -1397,22 +1405,24 @@ def policy_command(action, override=False):
             raise ControlError(f"The robot is not ready ({robot['mode'].replace('_', ' ')}). Restart the controller first.")
         if not monitor.checks.get("controller_listening"):
             raise ControlError("The Franka controller is not listening for arm commands.")
-    try:
-        result = policies.check(inference.run, inference.ckpt, _live_state())
-    except PolicyError as exc:
-        raise ControlError(str(exc))
-    if action == "init_arm":
-        pose = result.get("start_pose")
+    if action == "init_arm":   # the same pose as Move to center in the Operate card; here the inference node drives the arm
+        pose = inference.init_pose
         if not inference.arm_init or not pose:
-            raise ControlError("This launch has no start pose: the demos' start poses are not on this PC.")
+            raise ControlError("This launch cannot move the arm to the center pose. Stop it and start the policy launch live again.")
+        if any(abs(a - b) > 1e-4 for a, b in zip(pose, operate.center_pose())):
+            raise ControlError("The center pose rotation correction was changed after this policy launch started. Stop the launch and start it again to use the new value.")
         dist = operate._distance(pose[:3])
         if dist is None:
             raise ControlError("The arm position is unknown.")
         if dist > MAX_MOVE_M:
-            raise ControlError(f"The demos' start pose is {dist * 100:.0f} cm away, more than the {MAX_MOVE_M * 100:.0f} cm limit. Bring the arm closer first.")
+            raise ControlError(f"The center pose is {dist * 100:.0f} cm away, more than the {MAX_MOVE_M * 100:.0f} cm limit. Bring the arm closer first.")
         inference.ask_init()
         monitor.policy_command("init_arm")
-        return f"The arm is moving to the demos' start pose: {dist * 100:.0f} cm, about {max(1, round(dist / 0.02))} s."
+        return f"The arm is moving to the center pose: {dist * 100:.0f} cm, about {max(1, round(dist / 0.02))} s."
+    try:
+        result = policies.check(inference.run, inference.ckpt, _live_state())
+    except PolicyError as exc:
+        raise ControlError(str(exc))
     note = ""
     if not inference.preview:
         failed = _failed(result)
@@ -1487,14 +1497,12 @@ async def inference_start(request: Request):
     if failed and not preview and not body.get("override"):
         raise HTTPException(409, "Not started live, because a check failed: " + "; ".join(failed) + ". Fix it, or confirm in the page that you want to run anyway.")
     args = ["launch", "experiments", "run_policy_inference.launch.py", f"policy_ckpt_path:={path}", f"preview:={'true' if preview else 'false'}"]
-    pose = result.get("start_pose")
-    arm_init = bool(pose) and not preview
-    if arm_init:   # lets the node's init_arm command bring the arm to where the demos start
-        norm = sum(v * v for v in pose[3:7]) ** 0.5
-        pose = list(pose[:3]) + [v / norm for v in pose[3:7]]
+    arm_init, pose = not preview, None
+    if arm_init:   # lets the node's init_arm command bring the arm to the center pose, the one Move to center uses in the Operate card
+        pose = operate.center_pose()
         args += ["allow_arm_init:=true", "arm_init_pose:=[" + ",".join(f"{v:.6f}" for v in pose) + "]"]
     test_cmd = os.environ.get("APE_INFERENCE_TEST_CMD")   # tests only: a stand-in for the launch
-    inference.begin(json.loads(test_cmd) + args[3:] if test_cmd else ros2_cmd(*args), run, ckpt, preview, arm_init)
+    inference.begin(json.loads(test_cmd) + args[3:] if test_cmd else ros2_cmd(*args), run, ckpt, preview, arm_init, pose)
     operate.reset()
     return inference.info()
 

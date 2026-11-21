@@ -332,7 +332,7 @@ input[type=range] { width: 100%; }
       <div class="muted" id="pol-sub"></div>
       <div class="row" style="margin-top:10px">
         <button class="primary big-btn" id="pol-go">Start policy</button>
-        <button id="pol-init" title="The inference node moves the arm slowly (2 cm per second) to the pose where the training demos start.">Move arm to the demos' start pose</button>
+        <button id="pol-init" title="The arm moves slowly (2 cm per second) to the center pose: the same pose as Move to center in the Operate card.">Move to center</button>
         <button id="pol-reset" title="Clears the policy's memory of earlier steps. Only while the policy is stopped.">Reset policy state</button>
       </div>
     </div>
@@ -842,7 +842,14 @@ $('pol-live').onclick = () => polLaunch(false);
 $('pol-stop').onclick = () => post('/api/inference/stop');
 $('pol-go').onclick = polGo;
 $('pol-reset').onclick = () => polCmd('reset');
-$('pol-init').onclick = () => { if (confirm('Move the arm to the pose where the training demos start?\n\nThe arm moves by itself, slowly (about 2 cm per second), in a straight line. Keep clear and keep a hand on the stop button. Stop policy halts the move.')) polCmd('init_arm'); };
+// A launch started by a server from before this change still goes to the demos' start pose: say what will really happen.
+const polCenter = p => !!(p && p.init_target === 'center');
+const polInitWhat = p => polCenter(p) ? 'the center pose' : 'the demos\' start pose';
+$('pol-init').onclick = () => {
+  const dist = OP && OP.center && OP.center.distance;
+  const ask = polCenter(INF) ? 'Move the arm to the center pose' + (dist != null ? ` (${(dist * 100).toFixed(0)} cm away)` : '') + '?' : 'Move the arm to the pose where the training demos start?';
+  if (confirm(ask + '\n\nThe arm moves by itself, slowly (about 2 cm per second), in a straight line. Keep clear and keep a hand on the stop button. Stop policy halts the move.')) polCmd('init_arm');
+};
 $('pol-run').onchange = () => { store('pol_run', $('pol-run').value); fillPolicies(); store('pol_ckpt', $('pol-ckpt').value); loadChecks(); };
 $('pol-ckpt').onchange = () => { store('pol_ckpt', $('pol-ckpt').value); loadChecks(); };
 function polView(p, robot) {   // what the loaded policy is doing, for this card and for the Operate card
@@ -850,7 +857,7 @@ function polView(p, robot) {   // what the loaded policy is doing, for this card
   const v = {go: 'Start policy', goCls: live ? 'rec big-btn' : 'primary big-btn', goOn: p.node_ready && (!live || ready), cls: 'idle', pillC: '', sub: ''};
   if (p.stopping) { v.state = 'Stopping the policy launch…'; v.pill = 'Stopping…'; v.pillC = 'warn busy'; v.goOn = false; }
   else if (!p.node_ready) { v.state = 'Loading the policy…'; v.cls = 'warn'; v.pill = 'Loading the policy…'; v.pillC = 'warn busy'; v.goOn = false; v.sub = 'The cameras and the ORCA hand start (the hand moves to neutral), then the policy is loaded onto the graphics card. This can take a minute.'; }
-  else if (p.init === 'moving') { v.state = 'Arm moving to the demos\' start pose…'; v.cls = 'warn'; v.pill = 'Arm moving'; v.pillC = 'warn busy'; v.go = 'Stop move'; v.goCls = 'rec big-btn'; v.goOn = true; v.sub = 'The arm moves by itself: keep clear.'; }
+  else if (p.init === 'moving') { v.state = 'Arm moving to ' + polInitWhat(p) + '…'; v.cls = 'warn'; v.pill = 'Arm moving'; v.pillC = 'warn busy'; v.go = 'Stop move'; v.goCls = 'rec big-btn'; v.goOn = true; v.sub = 'The arm moves by itself: keep clear.'; }
   else if (p.policy_on) {
     v.state = live ? 'Policy running: LIVE' : 'Policy running: preview'; v.cls = live ? 'rec' : 'ok'; v.pill = v.state; v.pillC = (live ? 'bad' : 'ok') + ' busy'; v.go = 'Stop policy'; v.goCls = 'rec big-btn'; v.goOn = true;
     v.sub = live ? 'The policy drives the arm and the hand. Stop policy makes the arm hold its last target; it is not a safety stop.' : 'Nothing is sent to the arm or the hand. The Live view shows what the policy would command (dashed line, ring, finger marks).';
@@ -887,13 +894,15 @@ function renderPolicy(s) {
     const go = $('pol-go'); if (go.textContent !== v.go) go.textContent = v.go; go.className = v.goCls; go.disabled = !v.goOn || polBusy;
     const idle = p.node_ready && !p.policy_on && p.init !== 'moving' && !p.stopping;
     $('pol-reset').disabled = !idle || polBusy;
-    $('pol-init').style.display = !p.preview && p.arm_init ? '' : 'none'; $('pol-init').disabled = !idle || polBusy || !(polRobot && polRobot.mode === 'ready');
+    $('pol-init').style.display = !p.preview && p.arm_init ? '' : 'none';
+    const initLabel = polCenter(p) ? 'Move to center' : 'Move arm to the demos\' start pose'; if ($('pol-init').textContent !== initLabel) $('pol-init').textContent = initLabel;
+    $('pol-init').title = polCenter(p) ? 'The arm moves slowly (2 cm per second) to the center pose: the same pose as Move to center in the Operate card.' : 'The inference node moves the arm slowly (2 cm per second) to the pose where the training demos start.'; $('pol-init').disabled = !idle || polBusy || !(polRobot && polRobot.mode === 'ready');
     if (!p.node_ready && !p.stopping && p.age > 120) notes += W('warn', 'Loading takes unusually long. Open the Log below: the policy may have failed to load.');
     if (p.policy_on && !p.producing && p.policy_for > 2) notes += W('bad', '<b>The policy is started, but produces no actions.</b> ' + (p.last_pause ? 'The inference node reports: <code>' + esc(p.last_pause.text) + '</code>. ' : '') + 'It only acts when both camera images, the arm pose and the hand joints are all newer than 0.2 s. Check that the Franka controller runs (section 1) and that both cameras show an image.');
     else if (p.policy_on && p.last_pause && p.last_pause.age < 15) notes += W('warn', `The policy skipped steps ${p.pauses > 1 ? 'several times' : 'once'} since it was started, last ${Math.round(p.last_pause.age)} s ago: <code>${esc(p.last_pause.text)}</code>. Each time it forgets its plan and starts a new one.`);
     if (p.policy_on && p.slow) notes += W('warn', `The policy needed more than 0.2 s for a step ${p.slow} time${p.slow === 1 ? '' : 's'} since it was started. The graphics card is busy or too slow for this policy; the motion will stall.`);
-    if (p.init.startsWith('failed')) notes += W('warn', 'The arm did not reach the demos\' start pose: ' + esc(p.init.slice(8)) + '.');
-    if (p.init === 'done' && !p.policy_on) notes += W('warn', 'The arm is at the demos\' start pose.').replace('note warn', 'note" style="background:var(--ok-bg); color:var(--ok)');
+    if (p.init.startsWith('failed')) notes += W('warn', 'The arm did not reach ' + polInitWhat(p) + ': ' + esc(p.init.slice(8)) + '.');
+    if (p.init === 'done' && !p.policy_on) notes += W('warn', 'The arm is at ' + polInitWhat(p) + '.').replace('note warn', 'note" style="background:var(--ok-bg); color:var(--ok)');
     if (!p.preview && s.disk_free_gb < 20) notes += W('warn', `Only ${s.disk_free_gb} GB of disk space left, and a running policy logs about 1.4 GB per minute.`);
   } else {
     if (ext) notes += W('warn', 'A policy launch is running in a terminal outside this page. Stop it there (Ctrl-C) before starting one here.');

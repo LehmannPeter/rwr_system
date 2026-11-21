@@ -59,6 +59,11 @@ def run():
         print("node ready:", wait(lambda: inf()["node_ready"]), "| torque calls:", torque())
         print("start policy without confirming the failed check ->", api("/api/inference/cmd/start").get("ERR"))
         n0 = len(torque())
+        # Move to center: the launch got the center pose of the Operate card, and a correction changed afterwards is refused
+        print("init target:", inf()["init_target"], "| pose:", [round(v, 3) for v in S.inference.init_pose], "| same as Operate:", S.inference.init_pose == S.operate.center_pose())
+        if os.environ.get("APE_CENTER_ADJUST_FILE"):   # only with a test file: never change the station's own correction
+            S.operate.set_center_yaw(10); print("init_arm after the correction changed ->", api("/api/inference/cmd/init_arm").get("ERR"))
+            S.operate.set_center_yaw(0)
         print("init_arm:", api("/api/inference/cmd/init_arm").get("note") or "refused", "| init:", inf()["init"])
         print("start during the move ->", api("/api/inference/cmd/start", {"override": True}).get("ERR"))
         print("move done:", wait(lambda: inf()["init"] == "done"), "| init:", inf()["init"])
