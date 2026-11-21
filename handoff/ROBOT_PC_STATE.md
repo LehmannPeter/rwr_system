@@ -10,7 +10,7 @@ Last updated: 2026-11-21
 |---|---|
 | OS, GPU, free disk | Ubuntu 24.04.3 LTS (kernel 7.0.0-43); NVIDIA GeForce RTX 5060 Laptop GPU, 8 GB; 442 GB free of 937 GB |
 | ROS workspace path | `~/rwr_humble_ws` (pixi, ROS 2 Humble, Python 3.12). `src/rwr_system` is a symlink to `~/Projects/rwr_system`. The teleop and recordings are normally started from the `ape_ui` web app (`~/Projects/ape_ui`), which runs ROS in domain 7 with CycloneDDS |
-| `rwr_system` commit, branch, uncommitted changes | `9218688`, `main`. Uncommitted: `src/retargeter/retargeter_collect_calibration_data.py` torque fix (see Open problems) |
+| `rwr_system` commit, branch, uncommitted changes | `9218688`, `main`, pushed; nothing uncommitted |
 | `rwr_il` commit, importable in the ROS environment (yes/no) | `7cfc042` (`main`); yes, `from srl_il.export.policy import get_policy_from_ckpt` works in the pixi env (warns that pytorch3d is not installed) |
 | Folder where recordings are stored | Since 2026-11-21: `~/rwr_humble_ws/data/raw/<session>/`, processed in `data/processed/<session>_10hz/`, per-episode labels in `data/manifest.csv`, dataset versions in `data/datasets/<version>/` (set by `ape_ui`; tool: `rwr_il/scripts/rwr_data.py`, described in `rwr_il/CLAUDE.md`). Session names: `s<nn>_<date>_<operator>` |
 | Camera IDs match `cube_sorting_task.yaml` (yes/no, checked when) | yes: both MXIDs in the config (front_view, wrist_view) were the devices the OAK-D node opened on 2026-11-21 |
@@ -31,7 +31,7 @@ Last updated: 2026-11-21
 ## Open problems
 
 - Retargeter changed on 2026-11-21 (see Setup). Demonstrations recorded before and after the change map hand poses differently. Baseline measurement with the old config: `~/rwr_humble_ws/data/basemine4.h5`, made with the new script `src/retargeter/retargeter_teleop_test.py` (uncommitted). With the old config, tabletop and hook hand poses were impossible and pinches closed 12–15 mm tighter than the glove target.
-- `retargeter_collect_calibration_data.py` switched torque off while the retargeter was still sending positions, so the servos switched back on and the hand stayed stiff. Fixed locally (uncommitted): it now waits until no hand command has arrived for 0.5 s. The installed copy is not executable, so `ros2 run retargeter retargeter_collect_calibration_data.py` fails; run it with `python` (`~/collect.sh` does this for the `ape_ui` ROS domain).
+- `retargeter_collect_calibration_data.py` switched torque off while the retargeter was still sending positions, so the servos switched back on and the hand stayed stiff. Fixed (committed in `0a07e73`): it now waits until no hand command has arrived for 0.5 s. The installed copy is not executable, so `ros2 run retargeter retargeter_collect_calibration_data.py` fails; run it with `python` (`~/collect.sh` does this for the `ape_ui` ROS domain).
 - Motor 17 (`thumb_cmc`) reported an angle sensor error once on 2026-11-21. The ORCA thumb was mechanically hard to place in some hand-posed poses.
 - `retargeter_calibration.py` runs the retargeter for one call (2 optimiser steps) per sample, so the joint angles it fits against are far from converged (18° mean, up to 85°, measured on stored poses). Not changed.
 - The teleop retargeter publishes at about 31 Hz although its timer is set to 200 Hz.
