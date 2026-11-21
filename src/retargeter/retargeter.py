@@ -661,12 +661,14 @@ class Retargeter:
         Loss function for the virtual coupling.
         couplings: a dictionary of the coupling weights and the joint names, e.g
         """
-        loss = torch.tensor(0.0).to(self.device)
+        # Sum without in-place "+=" on a fresh tensor: torch.jit.trace records that as a
+        # constant, which made this term have no effect on the optimisation.
+        loss = 0.0
         robot_joints = robot_joints / (180 / np.pi)
 
         for cname, (weight, joint_lists) in couplings.items():
             factors = torch.zeros(self.n_tendons).to(self.device)
             for factor, joint_name in joint_lists: 
                 factors[self.tendon_names.index(joint_name)] = factor
-            loss += (factors * robot_joints).sum()**2 * weight
+            loss = loss + (factors * robot_joints).sum()**2 * weight
         return loss
