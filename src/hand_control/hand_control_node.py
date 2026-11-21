@@ -44,6 +44,11 @@ class HandControllerNode(Node):
             # publisher for sensor values (in radians)
             self.joint_angle_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/joint_position_from_motor', 10)
             self.joint_velocity_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/joint_velocity_from_motor', 10)
+            # monitoring only (joint_ids order): motor current [mA] at 10 Hz, temperature [deg C] every 2 s
+            self.motor_current_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/motor_current', 10)
+            self.motor_temperature_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/motor_temperature', 10)
+            self._monitor_tick = 0
+            self._temperature_failures = 0
 
             from faive_system.src.hand_control.orca.hand_controller_v2 import OrcaHandV2
             # orca_core requires the file name config.yaml; calibration.yaml is stored next to it
@@ -93,6 +98,27 @@ class HandControllerNode(Node):
         q_deg, qd_deg = self._hc.read_joint_state()
         self.joint_angle_pub.publish(Float32MultiArray(data=np.deg2rad(q_deg).astype(np.float32)))
         self.joint_velocity_pub.publish(Float32MultiArray(data=np.deg2rad(qd_deg).astype(np.float32)))
+        self.publish_motor_monitoring()
+
+    def publish_motor_monitoring(self):
+        """Publish motor current and temperature for monitoring. Must never disturb the control loop."""
+        try:
+            self._monitor_tick += 1
+            if self._monitor_tick % 10 == 0:
+                current = getattr(self._hc, "last_current_ma", None)
+                if current is not None:
+                    self.motor_current_pub.publish(Float32MultiArray(data=np.asarray(current, dtype=np.float32)))
+            if self._monitor_tick % 200 == 0 and self._temperature_failures < 5:
+                try:
+                    temperature = self._hc.read_motor_temperature()
+                    self.motor_temperature_pub.publish(Float32MultiArray(data=np.asarray(temperature, dtype=np.float32)))
+                    self._temperature_failures = 0
+                except Exception as e:
+                    self._temperature_failures += 1
+                    if self._temperature_failures == 5:
+                        self.get_logger().warn(f"Motor temperature reading disabled after repeated failures: {e}")
+        except Exception:
+            pass
 
 
     def set_torque_enabled_cb(self, request, response):

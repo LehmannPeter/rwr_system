@@ -44,7 +44,16 @@ class OrcaHandV2:
         motor_ids = self._hand.config.motor_ids
         motor_ratios = np.array([ratios[motor_ids[i]] or np.nan for i in self._joint_order])
         vel = self._joint_signs * np.asarray(state.velocity)[self._joint_order] / motor_ratios
+        # The same bus read also carries the motor currents: keep them for monitoring.
+        try:
+            self.last_current_ma = np.asarray(state.current, dtype=float)[self._joint_order]
+        except Exception:
+            self.last_current_ma = None
         return pos, vel
+
+    def read_motor_temperature(self):
+        """One extra bus read -> motor temperatures [deg C] in joint_ids order. Call it rarely."""
+        return np.asarray(self._hand.get_motor_temp(), dtype=float)[self._joint_order]
 
     def enable_torque(self):
         self._hand.enable_torque()
