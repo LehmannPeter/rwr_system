@@ -1,0 +1,1093 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>APE UI</title>
+<link rel="stylesheet" href="/static/vendor/xterm.css">
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --ink: #1c2330; --muted: #5d6878; --line: #dde1e8;
+  --accent: #1f5fd0; --accent-ink: #ffffff;
+  --ok: #17803d; --ok-bg: #e2f4e8; --warn: #9a5b00; --warn-bg: #fdf0d2;
+  --bad: #b3261e; --bad-bg: #fbe3e1; --idle: #5d6878; --idle-bg: #e8ebf0;
+  --term: #11161d;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12161c; --panel: #1b212a; --ink: #e6eaf0; --muted: #98a3b3; --line: #2c3542;
+    --accent: #6ea2ff; --accent-ink: #0c1320;
+    --ok: #6fd596; --ok-bg: #173524; --warn: #f0c063; --warn-bg: #3a2e12;
+    --bad: #ff8f86; --bad-bg: #40201e; --idle: #98a3b3; --idle-bg: #262e3a;
+    --term: #0b0f14;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 18px; margin: 0; letter-spacing: .01em; }
+header .safety { margin-left: auto; color: var(--muted); font-size: 13px; }
+main { max-width: 1180px; margin: 0 auto; padding: 18px 16px 60px; display: grid; gap: 16px; }
+.cols, .col { display: grid; gap: 16px; min-width: 0; align-content: start; }
+/* wide screens: two columns. Above the line what you use while operating, below it the numbered steps */
+@media (min-width: 1250px) { main { max-width: 2200px; } .cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; } }
+.divider { display: flex; align-items: center; gap: 12px; margin-top: 8px; color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: .02em; }
+.divider::after { content: ""; flex: 1; border-top: 2px solid var(--line); }
+/* the layouts inside a card follow the card's own width (container queries), not the window's */
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; container-type: inline-size; }
+.card h2 { font-size: 16px; margin: 0; }
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+[hidden] { display: none !important; }
+.head { justify-content: space-between; margin-bottom: 10px; }
+.pill { display: inline-flex; align-items: center; gap: 7px; padding: 3px 11px; border-radius: 999px; font-size: 13px; font-weight: 600; background: var(--idle-bg); color: var(--idle); white-space: nowrap; }
+.pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.pill.ok { background: var(--ok-bg); color: var(--ok); }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+.pill.bad { background: var(--bad-bg); color: var(--bad); }
+.pill.busy::before { animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: .25; } }
+button { font: inherit; font-weight: 600; padding: 7px 14px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+a.btn { display: inline-block; text-decoration: none; font: inherit; font-weight: 600; padding: 7px 14px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+a.btn:hover { border-color: var(--accent); }
+a.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.danger { color: var(--bad); border-color: var(--bad); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input[type=text], input[type=password] { font: inherit; padding: 6px 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); width: 230px; }
+label { color: var(--muted); font-size: 14px; display: inline-flex; align-items: center; gap: 6px; }
+.muted { color: var(--muted); font-size: 14px; }
+.robot { display: grid; grid-template-columns: minmax(220px, 1fr) 2fr; gap: 18px; align-items: start; }
+@container (max-width: 690px) { .robot { grid-template-columns: 1fr; } }
+.big { font-size: 28px; font-weight: 700; line-height: 1.15; }
+.big.ok { color: var(--ok); } .big.warn { color: var(--warn); } .big.bad { color: var(--bad); } .big.idle { color: var(--idle); }
+.checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
+.check { border: 1px solid var(--line); border-radius: 8px; padding: 8px 11px; }
+.check .k { color: var(--muted); font-size: 12.5px; }
+.check .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+.check .v.ok { color: var(--ok); } .check .v.warn { color: var(--warn); } .check .v.bad { color: var(--bad); }
+.steps { margin: 8px 0 0; padding-left: 20px; }
+.steps li { margin: 2px 0; }
+.note { margin-top: 10px; padding: 9px 12px; border-radius: 8px; font-size: 14px; }
+.note.warn { background: var(--warn-bg); color: var(--warn); }
+.note.bad { background: var(--bad-bg); color: var(--bad); }
+.note code, .muted code { font-size: 12.5px; word-break: break-all; }
+.term { background: var(--term); border-radius: 8px; padding: 8px; margin-top: 12px; height: 340px; overflow: hidden; }
+.term.small { height: 260px; }
+details > summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-top: 12px; user-select: none; }
+.op-grid { display: grid; grid-template-columns: minmax(260px, 1fr) 1.3fr; gap: 18px; align-items: start; }
+@container (max-width: 690px) { .op-grid { grid-template-columns: 1fr; } }
+.op-state { font-size: 24px; font-weight: 700; line-height: 1.2; }
+.op-state.ok { color: var(--ok); } .op-state.rec { color: var(--bad); } .op-state.warn { color: var(--warn); } .op-state.idle { color: var(--idle); }
+.op-timer { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
+button.big-btn { font-size: 18px; padding: 14px 22px; min-width: 210px; }
+button.rec { background: var(--bad); border-color: var(--bad); color: #fff; }
+.toggles { display: grid; gap: 8px; margin-top: 4px; }
+.toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 11px; }
+.toggle .t { font-weight: 600; } .toggle .d { color: var(--muted); font-size: 12.5px; }
+#op-card .toggles { gap: 6px; } #op-card .toggle { padding: 6px 11px; } #op-card .toggle .d { line-height: 1.3; }   /* compact: the whole card should fit on one screen */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; flex: none; }
+.seg button { border: 0; border-radius: 0; padding: 6px 12px; font-weight: 600; background: transparent; }
+.seg button.on { background: var(--accent); color: var(--accent-ink); }
+.dim { opacity: .5; pointer-events: none; }
+/* Live view: cameras, then both arm plots across the same width as the camera row, then hand and readouts side by side */
+.live { display: grid; gap: 12px; margin-top: 12px; }
+.live-left { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px 16px; align-items: start; min-width: 0; }
+.live-left .check { padding: 5px 10px; } .live-left .check .k { font-size: 12px; } .live-left .check .v { font-size: 14px; }
+.plots { --camh: min(31vh, calc((100cqw - 8px) / 2.341)); --plot: calc((var(--camh) * 2.341 - 2px) / 2); display: grid; grid-template-columns: var(--plot) var(--plot); gap: 6px 10px; align-items: start; justify-content: center; }   /* --camh as in .cams: two plots + 10px gap = camera row width */
+.plots canvas.trace { width: var(--plot); max-width: none; }
+.plots .sub-h { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@container (max-width: 600px) { .live-left { grid-template-columns: 1fr; } }
+/* both views share one row at the same height: 16:9 next to the turned 9:16 wrist view (width ratio 256 : 81) */
+.cams { --camh: min(31vh, calc((100cqw - 8px) / 2.341)); display: flex; gap: 8px; align-items: stretch; justify-content: center; }
+.cam { position: relative; background: var(--term); border-radius: 8px; overflow: hidden; }
+.cam.wide { flex: none; height: var(--camh); aspect-ratio: 16 / 9; }
+.cam.tall { flex: none; height: var(--camh); aspect-ratio: 9 / 16; }
+td.t-ok { background: var(--ok-bg); color: var(--ok); font-weight: 600; } td.t-warn { background: var(--warn-bg); color: var(--warn); font-weight: 600; } td.t-bad { background: var(--bad-bg); color: var(--bad); font-weight: 600; }
+.cam img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.cam .tag { position: absolute; left: 8px; top: 6px; font-size: 12px; font-weight: 600; color: #fff; background: rgba(0,0,0,.55); padding: 1px 7px; border-radius: 5px; }
+.cam .none { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; color: #9aa6b6; font-size: 13px; padding: 12px; }
+.sub-h { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 6px; }
+.fingers { display: grid; gap: 6px; }
+.finger { display: grid; grid-template-columns: 56px 1fr 44px; gap: 8px; align-items: center; font-size: 13px; }
+.bar { position: relative; height: 16px; background: var(--idle-bg); border-radius: 4px; overflow: hidden; }
+.bar .m { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: 4px; }
+.bar .c { position: absolute; top: -2px; bottom: -2px; width: 3px; background: var(--ink); border-radius: 2px; }
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 10px; }
+.num { font-variant-numeric: tabular-nums; }
+canvas.trace { width: 100%; max-width: 300px; aspect-ratio: 1; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: block; }
+table.t { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+table.t th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12.5px; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.t td { padding: 5px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+table.t td.r, table.t th.r { text-align: right; }
+table.t tr.sel td { background: var(--idle-bg); }
+.scroll { overflow-x: auto; }
+.tag-ok { color: var(--ok); font-weight: 600; } .tag-bad { color: var(--bad); font-weight: 600; } .tag-warn { color: var(--warn); font-weight: 600; }
+details.panel { border: 1px solid var(--line); border-radius: 8px; padding: 2px 12px 2px; margin-top: 10px; }
+details.panel[open] { padding-bottom: 12px; }
+details.panel > summary { margin: 8px 0; font-weight: 600; color: var(--ink); font-size: 14.5px; }
+select { font: inherit; padding: 6px 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+input[type=range] { width: 100%; }
+.player img { width: 100%; border-radius: 8px; background: var(--term); display: block; aspect-ratio: 632 / 270; object-fit: contain; }
+.toast.info { background: var(--ink); color: var(--bg); }
+.toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--bad); color: #fff; padding: 10px 16px; border-radius: 8px; max-width: 90vw; display: none; z-index: 10; }
+.offline { display: none; background: var(--bad-bg); color: var(--bad); padding: 8px 20px; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="offline" id="offline">The dashboard server is not answering. Start it again in a terminal.</div>
+<header>
+  <h1>APE UI · Cube Sorting</h1>
+  <span class="pill" id="hdr-robot">Robot: no data</span>
+  <span class="safety">This page is not a safety stop. Keep a person at the black stop button.</span>
+</header>
+
+<main>
+  <div class="cols">
+  <div class="col">
+  <section class="card">
+    <div class="robot">
+      <div>
+        <div class="muted">Franka arm</div>
+        <div class="big idle" id="robot-big">No data</div>
+        <div class="muted" id="robot-sub"></div>
+      </div>
+      <div>
+        <div class="checks" id="checks"></div>
+        <div id="robot-help"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="op-card">
+    <div class="row head">
+      <div class="row"><h2>Operate</h2><span class="pill" id="op-pill">Not available</span></div>
+      <div class="muted" id="op-data"></div>
+    </div>
+    <div class="op-grid">
+      <div>
+        <div class="op-state idle" id="op-state">Start a launch below first</div>
+        <div class="op-timer" id="op-timer"></div>
+        <div class="muted" id="op-sub"></div>
+        <div class="row" style="margin-top:12px">
+          <button class="primary big-btn" id="op-main">Start teleop</button>
+          <button class="rec big-btn" id="op-main2" style="display:none">Start teleop + recording</button>
+          <button id="op-rec-only" style="display:none">Pause teleop</button>
+        </div>
+        <div class="row" style="margin-top:10px; display:none" id="op-review">
+          <button class="primary big-btn" id="op-save" style="min-width:150px">Save demo</button>
+          <button class="danger" id="op-discard">Discard</button>
+        </div>
+        <div id="op-msg"></div>
+        <div id="op-attn"></div>
+      </div>
+      <div style="display:grid; gap:8px">
+      <div class="toggles" id="op-labels">
+        <div class="toggle" style="display:block"><div><div class="t">Demo labels</div><div class="d">Stored with each saved demo. They stay as set until you change them.</div></div>
+          <div class="row" style="gap:6px 14px; margin-top:6px; flex-wrap:wrap">
+            <label title="Colour of the cube in this recording. Mixed: one recording with relocations of cubes of different colours.">Cube colour <select id="lb-colour"><option value="">not set</option><option>red</option><option>blue</option><option>yellow</option><option>mixed</option></select></label>
+            <label title="Which placement of the arena, by your own list: a0 = the normal marked position, a1 and a2 = the other shifted or turned placements.">Arena pose <select id="lb-arena"><option value="">not set</option><option>a0</option><option>a1</option><option>a2</option></select></label>
+            <label title="Optional. Where the cube starts, on an imagined 3 by 3 grid on the arena floor: columns A to C from left to right in the workspace camera image, rows 1 to 3 from the robot side to the far side.">Cube cell <input type="text" id="lb-cell" placeholder="B3" maxlength="20" style="width:58px" spellcheck="false"></label>
+            <label title="How the cube lies at the start, by your own list: c0, c1, c2.">Cube orientation <select id="lb-orient"><option value="">not set</option><option>c0</option><option>c1</option><option>c2</option></select></label>
+            <label title="Day: daylight in the room. Night: lamps only.">Lighting <select id="lb-light"><option value="">not set</option><option>day</option><option>night</option></select></label>
+          </div>
+          <div class="row" style="margin-top:6px"><label style="flex:1" title="Optional free text for the next saved demo only, for example what was special about it. It is cleared after the demo is saved.">Description <input type="text" id="lb-desc" placeholder="optional, for the next saved demo only" maxlength="200" style="flex:1; width:auto" spellcheck="false"></label></div>
+          <div class="muted" id="lb-preview" style="margin-top:6px; font-size:13px"></div>
+          <div id="lb-note"></div></div>
+      </div>
+      <div class="toggles" id="op-toggles">
+        <div class="toggle"><div><div class="t">Arm motion scale</div><div class="d">Accurate: the arm moves 60% of the glove motion. Change only while paused.</div></div>
+          <div class="seg" id="tg-accurate"><button data-v="0">Normal</button><button data-v="1">Accurate</button></div></div>
+        <div class="toggle"><div><div class="t">Reverse arm directions</div><div class="d" id="op-coil-d">Turn on if the arm moves opposite to your hand. Sideways and forward/back reverse together; up/down stays. Change only while paused.</div></div>
+          <div class="seg" id="tg-coil"><button data-v="0">Off</button><button data-v="1">On</button></div></div>
+        <div class="toggle"><div><div class="t">Hand follows glove</div><div class="d">Turns on and off with teleop. Switch it off to hold a grasp while you reposition.</div></div>
+          <div class="seg" id="tg-follow"><button data-v="1">On</button><button data-v="0">Off</button></div></div>
+        <div class="toggle"><div><div class="t">Hand motor torque</div><div class="d">Switches on with teleop and pose moves, off when paused, so the motors can cool. Use the switch to override.</div></div>
+          <div class="seg" id="tg-torque"><button data-v="1">On</button><button data-v="0">Off</button></div></div>
+        <div class="toggle"><div><div class="t">Custom pose</div><div class="d" id="op-init-d">Only while paused. The arm moves by itself: keep clear, hand on the stop button.</div></div>
+          <div class="row" style="flex:none"><button id="op-setinit">Set</button><button id="op-init">Move to custom</button></div></div>
+        <div class="toggle"><div><div class="t">Center pose</div><div class="d" id="op-center-d">45 cm forward, centred, 40 cm up, palm down.</div></div>
+          <button id="op-center">Move to center</button></div>
+        <div class="toggle"><div><div class="t">After stopping a recording</div><div class="d" id="op-after-d">Where the arm goes when you press Stop recording and pause. It then moves by itself: keep clear.</div></div>
+          <div class="seg" id="tg-after"><button data-a="off">Stay</button><button data-a="center">Center</button><button data-a="start">Custom</button></div></div>
+      </div>
+      </div>
+    </div>
+  </section>
+  </div>
+  <div class="col">
+  <section class="card">
+    <div class="row head"><h2>Live view</h2><div class="muted" id="live-note"></div></div>
+    <div class="cams">
+      <div class="cam wide"><img id="cam-oakd_front_view" alt="Workspace camera"><span class="tag">Workspace</span><div class="none" id="none-oakd_front_view">No image. The cameras run with the station launch (section 2).</div></div>
+      <div class="cam tall"><img id="cam-oakd_wrist_view" alt="Wrist camera, turned 90 degrees anticlockwise for display"><span class="tag">Wrist (turned for display)</span><div class="none" id="none-oakd_wrist_view">No image.</div></div>
+    </div>
+    <div class="live">
+      <div class="live-left" style="order:2">
+        <div>
+          <p class="sub-h">Hand: closed ← measured bar, commanded line</p>
+          <div class="fingers" id="fingers"></div>
+        </div>
+        <div style="display:grid; gap:6px">
+          <div class="check"><div class="k">Hottest hand motor</div><div class="v num" id="hand-hot">no data</div></div>
+          <div class="check"><div class="k">Arm position (cm)</div><div class="v num" id="arm-xyz">no data</div></div>
+          <div class="check" title="Distance between the commanded and the measured hand position right now. Large values mean the arm lags behind the glove."><div class="k">Arm behind its command</div><div class="v num" id="arm-err">no data</div></div>
+          <div class="check" title="How far the hand is from where this demo started: distance in cm and rotation in degrees. Before the first recording it refers to the saved custom pose. End each demo close to its start, so demos start and end in the same place."><div class="k" id="arm-start-k">Distance to start pose</div><div class="v num" id="arm-start">no data</div></div>
+        </div>
+      </div>
+      <div class="plots">
+        <div><p class="sub-h">Arm path from above</p><canvas class="trace" id="trace" width="360" height="360"></canvas></div>
+        <div><p class="sub-h">Arm path from the side (height)</p><canvas class="trace" id="trace-side" width="360" height="360"></canvas></div>
+        <div class="muted" style="font-size:12px; grid-column: 1 / -1"><span style="color:var(--accent)">━</span> measured · <span>┄</span> commanded · <span style="color:var(--bad)">◇</span> start pose · <span style="color:var(--bad)">●</span> now · <a href="#" id="trace-clear">Clear</a></div>
+      </div>
+    </div>
+
+    <details class="panel" id="d-hand"><summary>Hand details</summary>
+      <div class="scroll"><table class="t" id="hand-table"></table></div>
+      <div class="row" style="margin-top:10px; justify-content:space-between">
+        <div class="muted" id="calib-info"></div>
+        <button class="danger" id="calib-btn">Recalibrate hand at next start</button>
+      </div>
+    </details>
+    <details class="panel" id="d-arm"><summary>Arm details</summary>
+      <div class="scroll"><table class="t" id="arm-pose-table"></table></div>
+      <div class="scroll" style="margin-top:10px"><table class="t" id="arm-joint-table"></table></div>
+      <div class="kv" id="arm-kv"></div>
+    </details>
+    <details class="panel" id="d-other"><summary>Other details</summary>
+      <p class="sub-h" style="margin-top:4px">Data streams</p>
+      <div class="scroll"><table class="t" id="rate-table"></table></div>
+      <p class="sub-h" style="margin-top:12px">Running nodes</p>
+      <div class="muted" id="node-list"></div>
+    </details>
+  </section>
+  </div>
+  </div>
+  <div class="divider">Setup and recorded demos</div>
+  <div class="cols">
+  <div class="col">
+  <section class="card">
+    <div class="row head">
+      <div class="row"><h2>1 · Franka controller (NUC)</h2><span class="pill" id="nuc-pill">Disconnected</span></div>
+      <div class="row">
+        <button class="primary" id="nuc-start">Start controller</button>
+        <button id="nuc-restart">Restart controller</button>
+        <button class="danger" id="nuc-stop">Stop controller</button>
+        <button id="nuc-disconnect">Disconnect</button>
+        <a class="btn" id="desk-link" target="_blank" rel="noopener" title="The robot's address is not set on this laptop: see README, section Start">Franka Desk ↗</a>
+      </div>
+    </div>
+    <div class="muted" id="nuc-hint">Before starting: in Franka Desk the brakes are unlocked, FCI is active and no error is shown.</div>
+    <form class="row" id="nuc-pw-form" style="margin-top:10px" hidden>
+      <label>NUC password <input type="password" id="nuc-pw" autocomplete="off" spellcheck="false"></label>
+      <button class="primary" type="submit">Log in</button>
+    </form>
+    <div id="nuc-notes"></div>
+    <details id="nuc-details"><summary>Terminal</summary>
+      <div class="term" id="term-nuc"></div>
+      <div class="muted" style="margin-top:6px">This is a real terminal on the NUC: click into it to type a command if a step goes wrong.</div>
+    </details>
+  </section>
+
+  <section class="card">
+    <div class="row head">
+      <div class="row"><h2>2 · Station launch (teleop, cameras, logger)</h2><span class="pill" id="recording-pill">Stopped</span></div>
+      <div class="row">
+        <label title="One number per recording session. Start a new session when the operator, the day or the setup changes.">Session no. <input type="text" id="ses-no" inputmode="numeric" maxlength="3" style="width:52px" spellcheck="false"></label>
+        <button id="ses-new" title="Use the next free session number">New</button>
+        <label>Operator <select id="ses-op"><option>Peter</option><option>Clarence</option><option>Johan</option><option>Flurin</option></select></label>
+        <input type="hidden" id="rec-name" value="">
+        <label><input type="checkbox" id="rec-hand" checked> with ORCA hand</label>
+        <button class="primary" id="recording-start">Start launch</button>
+        <button id="handonly-start" title="Gloves, retargeter and ORCA hand only: no arm teleop, cameras or logger">Hand only</button>
+        <button class="danger" id="recording-stop">Stop</button>
+      </div>
+    </div>
+    <div class="muted">
+      <ul style="margin:0; padding-left:20px">
+        <li style="margin:2px 0"><b>Start launch</b> starts the gloves, retargeter, hand, arm teleop, both cameras and the logger. Nothing is recorded until you start a recording in the Operate card. Do not run the keyboard runner at the same time.</li>
+        <li style="margin:2px 0"><b>Hand only</b> starts just the gloves, the retargeter and the ORCA hand, to try the hand without the arm: no arm teleop, no cameras, no logger, and the Franka controller is not needed.</li>
+      </ul>
+      <div style="margin-top:6px">Demos are saved to <code id="rec-path"></code> <span id="ses-info"></span>.</div>
+    </div>
+    <div id="recording-notes"></div>
+    <details id="recording-details"><summary>Log</summary><div class="term small" id="term-recording"></div></details>
+  </section>
+
+  <section class="card" id="pol-card">
+    <div class="row head">
+      <div class="row"><h2>4 · Run a policy</h2><span class="pill" id="pol-pill">Stopped</span></div>
+      <div class="row">
+        <label>Run <select id="pol-run" style="max-width:260px"></select></label>
+        <label>Checkpoint <select id="pol-ckpt" style="max-width:220px"></select></label>
+        <button class="primary" id="pol-preview" title="Loads the policy and starts the cameras and the ORCA hand. The policy's outputs are only shown, nothing is sent to the arm or the hand.">Start preview</button>
+        <button class="rec" id="pol-live" title="Loads the policy and starts the cameras and the ORCA hand. Once you press Start policy, its outputs drive the arm and the hand.">Start live</button>
+        <button class="danger" id="pol-stop">Stop</button>
+      </div>
+    </div>
+    <div class="muted" id="pol-info"></div>
+    <div id="pol-box" style="display:none; margin-top:12px">
+      <div class="op-state idle" id="pol-state"></div>
+      <div class="op-timer" id="pol-timer"></div>
+      <div class="muted" id="pol-sub"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="primary big-btn" id="pol-go">Start policy</button>
+        <button id="pol-init" title="The inference node moves the arm slowly (2 cm per second) to the pose where the training demos start.">Move arm to the demos' start pose</button>
+        <button id="pol-reset" title="Clears the policy's memory of earlier steps. Only while the policy is stopped.">Reset policy state</button>
+      </div>
+    </div>
+    <div id="pol-notes"></div>
+    <p class="sub-h" style="margin:14px 0 4px" id="pol-checks-h">Checks: does the station match the training data?</p>
+    <div class="scroll"><table class="t" id="pol-checks"></table></div>
+    <details id="inference-details"><summary>Log</summary><div class="term small" id="term-inference"></div></details>
+  </section>
+  </div>
+  <div class="col">
+  <section class="card">
+    <div class="row head">
+      <div class="row"><h2>3 · Recorded demos</h2><span class="pill" id="job-pill">Idle</span></div>
+      <div class="row">
+        <label>Session <select id="ds-select"></select></label>
+        <button class="primary" id="ds-process">Process and check new demos</button>
+        <button id="ds-upload" title="Uploads all raw and processed recordings that are not on Hugging Face yet, plus manifest.csv and the dataset version lists">Upload to Hugging Face</button>
+        <button class="danger" id="job-stop">Stop</button>
+      </div>
+    </div>
+    <div class="muted" id="ds-info"></div>
+    <div class="scroll" style="margin-top:8px"><table class="t" id="demo-table"></table></div>
+    <div class="player" id="player" style="display:none; margin-top:14px">
+      <div class="row" style="justify-content:space-between"><p class="sub-h" id="pl-title" style="margin:0"></p><button id="pl-close">Close</button></div>
+      <img id="pl-img" alt="Demo frame: workspace camera left, wrist camera (turned for display) right" style="margin-top:8px">
+      <div class="row" style="margin-top:8px; flex-wrap:nowrap"><button id="pl-play" style="min-width:74px">Play</button><input type="range" id="pl-seek" min="0" max="0" value="0"><span class="num muted" id="pl-time" style="white-space:nowrap"></span></div>
+      <div id="pl-check"></div>
+      <details class="panel"><summary>Trajectory plot</summary><img id="pl-plot" alt="Arm and hand trajectory plot" style="aspect-ratio:auto"></details>
+    </div>
+    <details id="job-details"><summary>Processing and upload log</summary><div class="term small" id="term-job"></div></details>
+  </section>
+  </div>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script src="/static/vendor/xterm.js"></script>
+<script src="/static/vendor/xterm-addon-fit.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function toast(msg, info) {
+  const t = $('toast'); t.textContent = msg; t.className = 'toast' + (info ? ' info' : ''); t.style.display = 'block';
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = 'none', 7000);
+}
+async function post(url, body) {
+  try {
+    const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
+    if (!r.ok) { const j = await r.json().catch(() => ({})); toast(j.detail || ('Request failed: ' + r.status)); return null; }
+    return await r.json();
+  } catch (e) { toast('The dashboard server is not answering.'); return null; }
+  finally { refresh(); }
+}
+
+/* ---------- terminals ---------- */
+const terms = {}, pending = {};
+function makeTerm(name, interactive) {
+  if (terms[name]) return terms[name];
+  const term = new Terminal({fontSize: 12.5, scrollback: 8000, convertEol: false, disableStdin: !interactive, cursorBlink: interactive,
+    theme: {background: getComputedStyle(document.documentElement).getPropertyValue('--term').trim()}});
+  const fit = new FitAddon.FitAddon(); term.loadAddon(fit);
+  term.open($('term-' + name));
+  const doFit = () => { try { if (!$('term-' + name).offsetHeight) return;   // folded away: keep the size
+    fit.fit(); fetch(`/api/term/${name}/resize`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({rows: term.rows, cols: term.cols})}); } catch (e) {} };
+  doFit(); new ResizeObserver(doFit).observe($('term-' + name));
+  if (interactive) {
+    let chain = Promise.resolve();   // keep keystrokes in order
+    term.onData(data => { chain = chain.then(() => fetch(`/api/term/${name}/input`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({data})}).catch(() => {})); });
+  }
+  terms[name] = term;
+  for (const chunk of pending[name] || []) term.write(chunk);   // output that arrived before the panel was opened
+  pending[name] = [];
+  return term;
+}
+(function termStream() {
+  let first = true;
+  const es = new EventSource('/api/terms');   // one connection for all logs
+  es.onopen = () => { if (!first) { for (const n in terms) terms[n].reset(); for (const n in pending) pending[n] = []; } first = false; };  // the server replays its buffers
+  for (const name of ['nuc', 'recording', 'job', 'inference'])
+    es.addEventListener(name, ev => {
+      const bin = atob(ev.data), a = new Uint8Array(bin.length); for (let k = 0; k < bin.length; k++) a[k] = bin.charCodeAt(k);
+      if (terms[name]) terms[name].write(a); else { (pending[name] = pending[name] || []).push(a); if (pending[name].length > 4000) pending[name].shift(); }
+    });
+})();
+for (const n of ['nuc', 'recording', 'job', 'inference']) {
+  const d = $(n + '-details');
+  try { if (localStorage.getItem('open-' + n) === '1') d.open = true; } catch (e) {}
+  const init = () => { if (d.open) makeTerm(n, n === 'nuc'); try { localStorage.setItem('open-' + n, d.open ? '1' : '0'); } catch (e) {} };
+  d.addEventListener('toggle', init); init();
+}
+
+/* ---------- actions ---------- */
+/* ---------- session name: s<number>_<date>_<operator> ---------- */
+let DS = [], sesChecked = false;
+const today = () => { const d = new Date(), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+const sesNumber = name => { const m = /^s(\d+)_/.exec(name); return m ? parseInt(m[1], 10) : null; };
+const nextSesNo = () => Math.max(0, ...DS.map(d => sesNumber(d.name)).filter(n => n != null)) + 1;
+function sessionName() { const n = parseInt($('ses-no').value, 10); return n > 0 ? `s${String(n).padStart(2, '0')}_${today()}_${$('ses-op').value}` : ''; }
+function sessionClash() { const name = sessionName(), n = sesNumber(name); return DS.find(d => d.name !== name && sesNumber(d.name) === n) || null; }
+function updateSession() {
+  const name = sessionName(), same = DS.find(d => d.name === name), clash = name ? sessionClash() : null;
+  $('rec-name').value = name;
+  $('ses-info').innerHTML = !name ? '(set a session number)' : clash ? `<b>(number already used by ${esc(clash.name)}: press New)</b>` : same ? `(continues this session: ${same.demos.length} demo${same.demos.length === 1 ? '' : 's'} so far)` : '(new session)';
+}
+try { const v = localStorage.getItem('ses_no'); if (v) $('ses-no').value = v; const o = localStorage.getItem('ses_op'); if (o) $('ses-op').value = o; } catch (e) {}
+function saveSession() { try { localStorage.setItem('ses_no', $('ses-no').value); localStorage.setItem('ses_op', $('ses-op').value); } catch (e) {} updateSession(); }
+$('ses-no').addEventListener('input', saveSession); $('ses-op').addEventListener('change', saveSession);
+$('ses-new').onclick = () => { $('ses-no').value = nextSesNo(); saveSession(); };
+for (const [id, key] of [['lb-colour', 'lb_colour'], ['lb-arena', 'lb_arena'], ['lb-cell', 'lb_cell'], ['lb-orient', 'lb_orient'], ['lb-light', 'lb_light']]) {
+  try { const v = localStorage.getItem(key); if (v) $(id).value = v; } catch (e) {}
+  $(id).addEventListener('change', () => { try { localStorage.setItem(key, $(id).value); } catch (e) {} showSaveLabel(); showPreview(); });   // runs on a later click, when everything below is set up
+}
+function showSaveLabel() { $('op-save').textContent = 'Save demo' + ($('lb-colour').value ? ' · ' + $('lb-colour').value : ''); }
+showSaveLabel();
+
+$('nuc-start').onclick = () => post('/api/nuc/start');
+$('nuc-pw-form').onsubmit = e => {
+  e.preventDefault();
+  const password = $('nuc-pw').value; $('nuc-pw').value = '';   // do not keep it in the page
+  if (password) post('/api/nuc/password', {password});
+};
+$('nuc-stop').onclick = () => post('/api/nuc/stop');
+$('nuc-restart').onclick = () => post('/api/nuc/restart');
+document.addEventListener('click', e => { if (e.target && e.target.classList.contains('do-restart')) post('/api/nuc/restart'); });
+$('nuc-disconnect').onclick = () => post('/api/nuc/disconnect');
+$('recording-start').onclick = () => {
+  updateSession(); const name = $('rec-name').value, clash = name ? sessionClash() : null;
+  if (!name) return toast('Set a session number first.');
+  if (clash) return toast(`Session number ${sesNumber(name)} is already used by ${clash.name}. Press New for the next free number.`);
+  $('recording-details').open = true; post('/api/recording/start', {dataset_name: name, hand: $('rec-hand').checked});
+};
+$('handonly-start').onclick = () => { $('recording-details').open = true; post('/api/hand_only/start'); };
+$('recording-stop').onclick = () => post('/api/recording/stop');
+
+/* ---------- operate ---------- */
+let OP = null, SV = {}, busy = false;
+async function ctl(action, body) {
+  if (busy) return; busy = true;
+  if ((action === 'teleop_start_rec' || action === 'rec_start') && LIVE.arm) demoStart = LIVE.arm.slice();   // the arm pose at the moment the demo starts
+  try { const r = await post('/api/ctl/' + action, body); if (r && r.note) toast(r.note, true); return !!r; }
+  finally { busy = false; }
+}
+$('op-main').onclick = () => {
+  if (!OP) return;
+  if (OP.policyMode) return polGo();
+  if (OP.moving) return ctl('move_stop');
+  if (OP.rec === 'recording') return ctl('rec_stop');
+  if (OP.active) return SV.rec_start && OP.rec === 'idle' && !OP.mustPause ? ctl('rec_start') : ctl('teleop_pause');
+  ctl('teleop_start');
+};
+$('op-rec-only').onclick = () => ctl('teleop_pause');
+$('op-main2').onclick = () => ctl('teleop_start_rec');
+$('op-save').onclick = async () => {
+  const ok = await ctl('rec_save', {labels: {colour: $('lb-colour').value, arena: $('lb-arena').value.trim(), cell: $('lb-cell').value.trim(), orientation: $('lb-orient').value, lighting: $('lb-light').value, description: $('lb-desc').value.trim()}});
+  if (ok) { $('lb-desc').value = ''; setTimeout(loadDatasets, 3000); }   // the description belongs to that one demo
+};
+function showPreview() {   // the name the next saved demo gets in dataset versions, and where its raw file goes
+  const session = (OP && OP.dataset) || $('rec-name').value, colour = $('lb-colour').value;
+  if (!session) { $('lb-preview').textContent = ''; return; }
+  const d = DS.find(x => x.name === session), n = d ? (d.next_number || d.demos.length + 1) : 1;
+  const m = /^(s\d+)_\d{4}-\d{2}-\d{2}_.+$/.exec(session), prefix = m ? m[1] : session, num = String(n).padStart(4, '0');
+  $('lb-preview').innerHTML = `Next demo: <code>${esc(prefix)}_${colour ? esc(colour) : '&lt;colour&gt;'}_${num}.h5</code>` + (colour ? '' : ' <b>(set the cube colour)</b>');
+  $('lb-preview').title = `The name this demo gets in dataset versions. Its raw recording is saved as data/raw/${session}/<date>_<time>.h5`;
+}
+$('op-discard').onclick = () => { if (confirm('Discard this demo? It cannot be recovered.')) ctl('rec_discard'); };
+const moveAsk = (what, d) => confirm(`Move the arm to the ${what} now? It is ${d != null ? Math.round(d * 100) + ' cm away (about ' + Math.max(1, Math.round(d / 0.10)) + ' s)' : 'an unknown distance away'}. The arm moves by itself, slowly. Keep clear and keep a hand on the stop button.`);
+$('op-init').onclick = () => { if (moveAsk('saved custom pose', OP && OP.start_pose && OP.start_pose.distance)) ctl('move2init'); };
+for (const b of $('tg-after').querySelectorAll('button')) b.onclick = () => ctl('after_stop', {value: b.dataset.a});
+$('op-center').onclick = () => { if (moveAsk('center pose', OP && OP.center && OP.center.distance)) ctl('move2center'); };
+$('op-setinit').onclick = () => { if (confirm((OP && OP.start_pose && OP.start_pose.saved ? 'Replace the saved custom pose' : 'Save the custom pose') + ' with the pose the arm is in right now?')) ctl('set_start'); };
+for (const [id, action] of [['tg-accurate', 'accurate'], ['tg-coil', 'coil_reverse'], ['tg-follow', 'hand_follow'], ['tg-torque', 'hand_torque']])
+  for (const b of $(id).querySelectorAll('button')) b.onclick = () => ctl(action, {on: b.dataset.v === '1'});
+function seg(id, value, enabled) {
+  for (const b of $(id).querySelectorAll('button')) { b.classList.toggle('on', (b.dataset.v === '1') === !!value); b.disabled = !enabled; }
+}
+const mmss = t => { t = Math.max(0, Math.floor(t || 0)); return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0'); };
+
+function renderOperate(s) {
+  const o = s.operate, c = (s.ros && s.ros.checks) || {}; SV = c.services || {};
+  const r = s.ros && s.ros.robot;
+  const haveTeleop = !!SV.resume, haveHand = !!SV.hand_follow, haveLog = !!SV.rec_start;
+  const available = haveTeleop || haveHand;
+  const station = s.procs.recording;   // hand only: no arm teleop node, and not because a full launch lost it
+  const handOnly = haveHand && !haveTeleop && !(station.running && station.mode !== 'hand_only');
+  o.active = o.teleop_running || o.hand_following; OP = o;
+  const main = $('op-main'), st = $('op-state');
+  let state, cls, sub = '', pillT, pillC = '', label, btnCls = 'primary big-btn', mainOn = available;
+  const inf = s.procs.inference, polUp = !!(inf && inf.running);
+  o.policyMode = !available && polUp;   // a policy launch runs instead of the station launch: this card operates the policy
+  if (o.policyMode) { const v = polView(inf, r); state = v.state; cls = v.cls; sub = v.sub + ' Launch, checks and log: section 4.'; pillT = v.pill; pillC = v.pillC; label = v.go; btnCls = v.goCls; mainOn = v.goOn; }
+  else if (!available) { state = 'Start a launch below first'; cls = 'idle'; pillT = 'Not available'; label = 'Start teleop'; mainOn = false; }
+  else if (o.moving) { state = 'Moving to the ' + o.moving + '…'; cls = 'warn'; pillT = 'Arm moving'; pillC = 'warn busy'; label = 'Stop move'; btnCls = 'rec big-btn'; sub = 'About ' + Math.ceil(o.move_left) + ' s left. The arm moves by itself: keep clear.'; }
+  else if (o.rec === 'recording') { state = 'Recording'; cls = 'rec'; pillT = 'Recording'; pillC = 'bad busy'; label = 'Stop recording and pause'; btnCls = 'rec big-btn'; }
+  else if (o.rec === 'review') { state = 'Demo stopped: save or discard'; cls = 'warn'; pillT = 'Waiting for save / discard'; pillC = 'warn'; label = 'Start teleop'; mainOn = false; sub = 'Length ' + mmss(o.rec_elapsed) + '. Teleop is paused.'; }
+  else if (o.rec === 'saving') { state = 'Saving the demo…'; cls = 'warn'; pillT = 'Saving'; pillC = 'warn busy'; label = 'Start teleop'; mainOn = false; sub = 'Converting the recording. This can take a minute; wait before the next demo.'; }
+  else if (o.active) {
+    state = o.teleop_running ? 'Teleop running' : handOnly ? 'Hand teleop running' : 'Hand tracking on (arm not following)'; cls = 'ok'; pillT = handOnly ? 'Hand teleop running' : 'Teleop running'; pillC = 'ok';
+    o.mustPause = o.teleop_running && !!r && r.mode !== 'ready';   // arm cannot follow: pausing is the only sensible step
+    const recNext = haveLog && !o.mustPause;
+    label = recNext ? 'Start recording' : 'Pause teleop'; btnCls = recNext ? 'rec big-btn' : 'primary big-btn';
+    sub = o.mustPause ? 'The arm is not following. Pause teleop.' : haveLog ? 'Not recording. Start the recording when you are ready, or pause.' : handOnly ? 'The hand follows the glove. The arm is not part of this launch and does not move.' : 'The arm and hand follow the glove.';
+  } else {
+    state = 'Paused'; cls = 'idle'; pillT = 'Paused'; label = 'Start teleop';
+    sub = 'Hold your hand still when starting. With "+ recording" the fingers follow first; the arm and the recording start together one second later, so every demo begins at the pose the arm is in now.';
+    if (handOnly) { label = 'Start hand teleop'; sub = 'Hand only: the fingers follow the glove. The arm is not part of this launch and does not move.'; }
+    if (haveTeleop && r && r.mode !== 'ready') { mainOn = false; sub = 'The robot is not ready. Restart the controller first (section 1).'; }
+    else if (haveTeleop && !r) { mainOn = false; sub = 'The Franka controller is not running. Start it first (section 1). To test only the hand, use the Hand follows glove switch.'; }
+  }
+  st.textContent = state; st.className = 'op-state ' + cls; $('op-sub').textContent = sub;
+  $('op-timer').textContent = o.rec === 'recording' ? mmss(o.rec_elapsed) : o.policyMode && inf.policy_on ? mmss(inf.policy_for) : '';
+  pill($('op-pill'), pillT, pillC);
+  if (main.textContent !== label) main.textContent = label;
+  main.className = btnCls; main.disabled = !mainOn || busy || (o.policyMode && polBusy);
+  const main2 = $('op-main2'), pausedIdle = available && !o.moving && !o.active && o.rec === 'idle';   // paused and nothing pending
+  main2.style.display = (pausedIdle && haveLog) ? '' : 'none'; main2.disabled = !mainOn || busy;
+  const pauseOnly = $('op-rec-only');   // while teleop runs with a logger: a way to pause without recording
+  pauseOnly.style.display = (o.active && haveLog && o.rec === 'idle' && !o.mustPause) ? '' : 'none'; pauseOnly.textContent = 'Pause teleop';
+  $('op-review').style.display = o.rec === 'review' ? 'flex' : 'none';
+  $('op-msg').innerHTML = o.message ? `<div class="note warn">${esc(o.message)}</div>` : '';
+  $('op-toggles').classList.toggle('dim', !available);
+  seg('tg-accurate', o.accurate, !!SV.accurate && !o.teleop_running);
+  seg('tg-coil', !!o.coil_yaw_deg, !o.teleop_running && o.rec === 'idle');
+  $('op-coil-d').textContent = (o.coil_yaw_deg && Math.abs(o.coil_yaw_deg) !== 180 ? `Glove directions are turned by ${o.coil_yaw_deg}° (set in the station file). ` : '') + 'Turn on if the arm moves opposite to your hand. Sideways and forward/back reverse together; up/down stays. Change only while paused.';
+  seg('tg-follow', o.hand_following, haveHand);
+  seg('tg-torque', o.torque, !!SV.hand_torque);
+  const sp = o.start_pose || {}, ce = o.center || {}, canMove = !o.teleop_running && !o.moving && !!(r && r.mode === 'ready');
+  const cm = v => Math.round(v * 100) + ' cm', tooFar = v => v != null && v > o.max_move;
+  $('op-init').disabled = !SV.move2init || !canMove || !sp.saved || sp.distance == null || tooFar(sp.distance);
+  $('op-center').disabled = !SV.move2center || !canMove || ce.distance == null || tooFar(ce.distance);
+  $('op-setinit').disabled = !SV.set_start || o.teleop_running || !!o.moving || !r;
+  $('op-init-d').textContent = !sp.saved ? 'No custom pose saved yet. Bring the arm to the pose you want (teleop, then pause), then press Set.'
+    : sp.distance == null ? 'A custom pose is saved. Arm position unknown.'
+    : tooFar(sp.distance) ? `Saved custom pose is ${cm(sp.distance)} away: beyond the ${cm(o.max_move)} limit. Bring the arm closer first.`
+    : `Saved custom pose is ${cm(sp.distance)} away. Moves only while paused.`;
+  for (const b of $('tg-after').querySelectorAll('button')) { b.classList.toggle('on', b.dataset.a === (o.after_stop || 'off')); b.disabled = b.dataset.a === 'start' && !sp.saved; }
+  $('op-after-d').textContent = o.after_stop === 'center' ? 'After Stop recording and pause, the arm moves to the center pose by itself. Keep clear.' : o.after_stop === 'start' ? 'After Stop recording and pause, the arm moves to your saved custom pose by itself. Keep clear.' : 'The arm stays where it is after Stop recording and pause.';
+  $('op-center-d').textContent = '45 cm forward, centred, 40 cm up, palm down' + (ce.yaw_deg ? `, turned ${ce.yaw_deg > 0 ? '+' : ''}${ce.yaw_deg}° (positive = anticlockwise from above).` : '.') + (ce.distance == null ? '' : tooFar(ce.distance) ? ` It is ${cm(ce.distance)} away: beyond the ${cm(o.max_move)} limit.` : ` It is ${cm(ce.distance)} away. Moves only while paused.`);
+  let d = '';
+  if (haveLog && o.dataset) d = `Dataset <b>${esc(o.dataset)}</b> · ${o.demo_count} demo${o.demo_count === 1 ? '' : 's'} saved` + (o.last_files.length ? ` · last: ${esc(o.last_files[o.last_files.length - 1].name)} (${o.last_files[o.last_files.length - 1].gb} GB)` : '');
+  else if (haveLog) d = 'Recording launch started outside APE: demo count not shown.';
+  else if (available) d = handOnly ? 'Hand only launch: nothing is recorded.' : 'No logger running: teleop only, nothing is recorded.';
+  $('op-data').innerHTML = d;
+}
+
+/* ---------- live view ---------- */
+let HC = null, LIVE = {}, trail = [], trailCmd = [], lastRec = '', lastTeleop = false, lastPolicy = false, demoStart = null;
+const startRef = () => demoStart || (OP && OP.start_pose && OP.start_pose.position ? OP.start_pose.position.concat(OP.start_pose.quat || []) : null);
+async function loadHandConfig() {   // retried: the bars and the joint table need it
+  try { const c = await (await fetch('/api/hand_config', {cache: 'no-store'})).json(); if (c.joints && c.joints.length) { HC = c; if (LIVE.t) renderLive(LIVE); return; } } catch (e) { console.error('hand config', e); }
+  setTimeout(loadHandConfig, 3000);
+}
+loadHandConfig();
+const FN = ['thumb', 'index', 'middle', 'ring', 'pinky'];
+function buildFingers() {
+  $('fingers').innerHTML = FN.map(f => `<div class="finger"><span>${f[0].toUpperCase() + f.slice(1)}</span><div class="bar"><div class="m" id="fm-${f}"></div><div class="c" id="fc-${f}"></div></div><span class="num muted" id="fp-${f}"></span></div>`).join('');
+}
+buildFingers();
+function flex(values, f) {   // 0 = open, 1 = closed: mean of the finger's flexion joints within their range
+  if (!HC || !values || !HC.fingers[f] || !HC.fingers[f].length) return null;
+  let sum = 0;
+  for (const i of HC.fingers[f]) { const [lo, hi] = HC.roms[HC.joints[i]]; sum += Math.min(1, Math.max(0, (values[i] * 180 / Math.PI - lo) / (hi - lo))); }
+  return sum / HC.fingers[f].length;
+}
+for (const id of ['d-hand', 'd-arm', 'd-other']) {
+  const d = $(id);
+  try { if (localStorage.getItem('open-' + id) === '1') d.open = true; } catch (e) {}
+  d.addEventListener('toggle', () => { try { localStorage.setItem('open-' + id, d.open ? '1' : '0'); } catch (e) {} });
+}
+$('trace-clear').onclick = e => { e.preventDefault(); trail = []; trailCmd = []; };
+const f1 = v => v == null ? '–' : v.toFixed(1), f2 = v => v == null ? '–' : v.toFixed(2), f3 = v => v == null ? '–' : v.toFixed(3);
+function euler(q) {   // quaternion xyzw -> roll, pitch, yaw in degrees
+  const [x, y, z, w] = q, d = 180 / Math.PI;
+  return [Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)) * d, Math.asin(Math.max(-1, Math.min(1, 2 * (w * y - z * x)))) * d, Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)) * d];
+}
+function drawView(id, h0, h1, v0, v1, hk, vk, flipH) {   // one view of the arm path: metres on both axes, hk/vk = which coordinate goes where
+  const c = $(id), W = c.clientWidth, H = c.clientHeight, dpr = window.devicePixelRatio || 1; if (!W || !H) return;
+  if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }   // backing store follows the displayed size: sharp at any plot size
+  const g = c.getContext('2d'), cs = getComputedStyle(document.documentElement); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const px = p => { const u = (p[hk] - h0) / (h1 - h0); return [W * (flipH ? 1 - u : u), H * (1 - (p[vk] - v0) / (v1 - v0))]; };
+  const line = (pts, color, width, dash) => { if (pts.length < 2) return; g.strokeStyle = color; g.lineWidth = width; g.setLineDash(dash); g.beginPath(); pts.forEach((p, i) => { const [x, y] = px(p); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke(); g.setLineDash([]); };
+  const ink = cs.getPropertyValue('--ink'), accent = cs.getPropertyValue('--accent');
+  g.clearRect(0, 0, W, H);
+  g.strokeStyle = cs.getPropertyValue('--line'); g.lineWidth = 1; g.fillStyle = cs.getPropertyValue('--muted'); g.font = '11px system-ui';
+  for (let v = Math.ceil(v0 / 0.2 + 0.01) * 0.2; v < v1; v += 0.2) { const y = H * (1 - (v - v0) / (v1 - v0)); g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); g.fillText(Math.round(v * 100) + ' cm', 3, y - 2); }
+  for (let h = Math.ceil(h0 / 0.2 + 0.01) * 0.2; h < h1; h += 0.2) { const u = (h - h0) / (h1 - h0), x = W * (flipH ? 1 - u : u); g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); if (!flipH) g.fillText(Math.round(h * 100) + ' cm', x + 3, H - 3); }
+  const base = [0, 0, 0], [bx, by] = px(base); g.fillRect(bx - 9, Math.min(by, H) - 6, 18, 6);
+  line(trailCmd, ink, 1, [3, 3]);
+  line(trail, accent, 1, []);
+  const sp = startRef();
+  const red = cs.getPropertyValue('--bad');
+  if (sp) { const [x, y] = px(sp); g.strokeStyle = red; g.lineWidth = 2.5; g.beginPath(); g.moveTo(x, y - 9); g.lineTo(x + 9, y); g.lineTo(x, y + 9); g.lineTo(x - 9, y); g.closePath(); g.stroke(); }
+  if (LIVE.arm_cmd) { const [x, y] = px(LIVE.arm_cmd); g.strokeStyle = ink; g.lineWidth = 2.5; g.beginPath(); g.arc(x, y, 9, 0, 7); g.stroke(); }
+  if (LIVE.arm) { const [x, y] = px(LIVE.arm); g.fillStyle = red; g.beginPath(); g.arc(x, y, 6, 0, 7); g.fill(); }
+}
+function drawTrace() {
+  drawView('trace', -0.45, 0.45, 0.0, 0.9, 1, 0, true);        // from above: left is left, forward is up
+  drawView('trace-side', 0.0, 0.9, 0.0, 0.9, 0, 2, false);    // from the side: forward is right, height is up
+}
+addEventListener('resize', drawTrace);
+const TEMP_WARN = 55, TEMP_BAD = 65;   // deg C: amber and red thresholds for the hand motors
+const tempClass = t => t >= TEMP_BAD ? 't-bad' : t >= TEMP_WARN ? 't-warn' : 't-ok';
+function renderLive(d) {
+  LIVE = d;
+  for (const f of FN) {
+    const m = flex(d.hand, f), c = flex(d.hand_cmd, f);
+    $('fm-' + f).style.width = m == null ? '0' : (m * 100) + '%';
+    $('fc-' + f).style.display = c == null ? 'none' : ''; if (c != null) $('fc-' + f).style.left = `calc(${c * 100}% - 1.5px)`;
+    $('fp-' + f).textContent = m == null ? '–' : Math.round(m * 100) + '%';
+  }
+  const hot = $('hand-hot');
+  if (d.hand_temp && d.hand_temp.length) {
+    const t = Math.max(...d.hand_temp), i = d.hand_temp.indexOf(t);
+    hot.textContent = `${t.toFixed(0)} °C` + (HC && HC.joints[i] ? ` (${HC.joints[i].replace('_', ' ')})` : '');
+    hot.className = 'v num ' + (t >= TEMP_BAD ? 'bad' : t >= TEMP_WARN ? 'warn' : 'ok');
+  } else { hot.textContent = d.hand ? 'not reported' : 'no data'; hot.className = 'v num'; }
+  $('arm-xyz').textContent = d.arm ? `x ${f1(d.arm[0] * 100)}  y ${f1(d.arm[1] * 100)}  z ${f1(d.arm[2] * 100)}` : 'no data';
+  const addPoint = (list, p) => { const l = list[list.length - 1]; if (!l || Math.hypot(l[0] - p[0], l[1] - p[1], l[2] - p[2]) > 0.002) { list.push([p[0], p[1], p[2]]); if (list.length > 3000) list.shift(); } };
+  if (d.arm) addPoint(trail, d.arm);
+  if (d.arm_cmd && ((OP && OP.teleop_running) || d.policy)) addPoint(trailCmd, d.arm_cmd);   // the last target stays set while paused: only follow it during teleop or while a policy runs
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) * 100, sp = startRef();
+  const turn = (a, b) => a.length >= 7 && b.length >= 7 ? 2 * Math.acos(Math.min(1, Math.abs(a[3] * b[3] + a[4] * b[4] + a[5] * b[5] + a[6] * b[6]))) * 180 / Math.PI : null;
+  $('arm-err').textContent = d.arm && d.arm_cmd && ((OP && OP.teleop_running) || d.policy) ? f1(dist(d.arm, d.arm_cmd)) + ' cm' : d.arm ? (INF && INF.running ? 'policy stopped' : 'teleop paused') : 'no data';
+  const tr = d.arm && sp ? turn(d.arm, sp) : null;
+  $('arm-start-k').textContent = demoStart ? 'Distance to the start of this demo' : 'Distance to custom pose';
+  $('arm-start').textContent = !d.arm ? 'no data' : sp ? f1(dist(d.arm, sp)) + ' cm' + (tr == null ? '' : ' · ' + f1(tr) + '°') : 'no custom pose set';
+  drawTrace();
+  if ($('d-hand').open) {
+    let h = '<tr><th>Joint</th><th class="r">Commanded °</th><th class="r">Measured °</th><th class="r">Difference °</th><th class="r">Current mA</th><th class="r">Temp °C</th></tr>';
+    const J = HC ? HC.joints : [], deg = v => v == null ? null : v * 180 / Math.PI;
+    for (let i = 0; i < J.length; i++) {
+      const c = d.hand_cmd ? deg(d.hand_cmd[i]) : null, m = d.hand ? deg(d.hand[i]) : null;
+      h += `<tr><td>${esc(J[i].replace('_', ' '))}</td><td class="r">${f1(c)}</td><td class="r">${f1(m)}</td><td class="r">${c != null && m != null ? f1(m - c) : '–'}</td><td class="r">${d.hand_current ? d.hand_current[i].toFixed(0) : '–'}</td><td class="r ${d.hand_temp ? tempClass(d.hand_temp[i]) : ''}">${d.hand_temp ? d.hand_temp[i].toFixed(0) : '–'}</td></tr>`;
+    }
+    $('hand-table').innerHTML = h;
+  }
+  if ($('d-arm').open) {
+    const row = (n, p) => { if (!p) return `<tr><td>${n}</td><td colspan="6" class="muted">no data</td></tr>`; const e = euler(p.slice(3)); return `<tr><td>${n}</td><td class="r">${f1(p[0] * 100)}</td><td class="r">${f1(p[1] * 100)}</td><td class="r">${f1(p[2] * 100)}</td><td class="r">${f1(e[0])}</td><td class="r">${f1(e[1])}</td><td class="r">${f1(e[2])}</td></tr>`; };
+    let dr = '<tr><td>Difference</td><td colspan="6" class="muted">–</td></tr>';
+    if (d.arm && d.arm_cmd) { const a = euler(d.arm.slice(3)), b = euler(d.arm_cmd.slice(3)), w = v => ((v + 540) % 360) - 180; dr = `<tr><td>Difference</td>${[0, 1, 2].map(k => `<td class="r">${f1((d.arm[k] - d.arm_cmd[k]) * 100)}</td>`).join('')}${[0, 1, 2].map(k => `<td class="r">${f1(w(a[k] - b[k]))}</td>`).join('')}</tr>`; }
+    $('arm-pose-table').innerHTML = '<tr><th>End effector</th><th class="r">x cm</th><th class="r">y cm</th><th class="r">z cm</th><th class="r">roll °</th><th class="r">pitch °</th><th class="r">yaw °</th></tr>' + row('Commanded (last target)', d.arm_cmd) + row('Measured', d.arm) + dr;
+    const fr = d.franka;
+    let jt = '<tr><th>Joint</th><th class="r">Angle °</th><th class="r">Allowed range °</th><th class="r">Left to limit °</th><th class="r">Speed °/s</th><th class="r">Torque Nm</th><th class="r">External torque Nm</th><th>Contact</th></tr>';
+    const LIM = [[-166, 166], [-101, 101], [-166, 166], [-176, -4], [-166, 166], [-1, 215], [-166, 166]];   // Franka joint limits, degrees
+    if (fr) for (let i = 0; i < 7; i++) { const a = fr.q[i] * 180 / Math.PI, mg = Math.min(a - LIM[i][0], LIM[i][1] - a); jt += `<tr><td>${i + 1}</td><td class="r">${f1(a)}</td><td class="r">${LIM[i][0]} to ${LIM[i][1]}</td><td class="r ${mg < 12 ? 't-bad' : mg < 25 ? 't-warn' : ''}">${f1(mg)}</td><td class="r">${f1(fr.dq[i] * 180 / Math.PI)}</td><td class="r">${f2(fr.tau[i])}</td><td class="r">${f2(fr.tau_ext[i])}</td><td>${fr.joint_collision[i] ? '<span class="tag-bad">collision</span>' : fr.joint_contact[i] ? '<span class="tag-warn">contact</span>' : ''}</td></tr>`; }
+    else jt += '<tr><td colspan="8" class="muted">No data: the controller is not running.</td></tr>';
+    $('arm-joint-table').innerHTML = jt;
+    $('arm-kv').innerHTML = fr ? check('External force at the hand (N)', `x ${f1(fr.wrench[0])}  y ${f1(fr.wrench[1])}  z ${f1(fr.wrench[2])}`) + check('External torque at the hand (Nm)', `x ${f1(fr.wrench[3])}  y ${f1(fr.wrench[4])}  z ${f1(fr.wrench[5])}`)
+      + check('Contact / collision (x y z)', (fr.cart_collision.slice(0, 3).some(v => v) ? 'collision' : fr.cart_contact.slice(0, 3).some(v => v) ? 'contact' : 'none'), fr.cart_collision.slice(0, 3).some(v => v) ? 'bad' : fr.cart_contact.slice(0, 3).some(v => v) ? 'warn' : '')
+      + check('Hand mass set in Desk', `${f2(fr.m_ee)} kg, centre ${fr.com_ee.map(v => (v * 100).toFixed(0)).join(' / ')} cm`) : '';
+  }
+}
+(function liveStream() { const es = new EventSource('/api/live'); es.onmessage = ev => { try { renderLive(JSON.parse(ev.data)); } catch (e) { console.error('live view', e); document.body.dataset.liveError = String(e && e.stack || e).slice(0, 300); } }; })();
+/* cameras: fetch single frames so no connection stays open */
+for (const cam of ['oakd_front_view', 'oakd_wrist_view']) {
+  const img = $('cam-' + cam), none = $('none-' + cam);
+  const next = ok => { none.style.display = ok ? 'none' : 'flex'; img.style.visibility = ok ? 'visible' : 'hidden'; setTimeout(load, ok ? 130 : 1500); };
+  const load = () => { if (document.hidden) return setTimeout(load, 1000); const probe = new Image(); probe.onload = () => { img.src = probe.src; next(true); }; probe.onerror = () => next(false); probe.src = `/api/cam/${cam}.jpg?t=${Date.now()}`; };
+  load();
+}
+$('calib-btn').onclick = async () => {
+  if (!confirm('Recalibrate the hand at the next launch start?\n\nThe current calibration is moved to a backup folder. At the next start every finger joint is driven to its end stops. Demos recorded before and after a recalibration differ slightly, so only do this for a reason (tendon change, hand no longer opens or closes fully).')) return;
+  const r = await post('/api/hand/recalibrate'); if (r && r.note) toast(r.note, true);
+};
+
+/* ---------- recorded demos ---------- */
+let PL = null;
+const STREAMS = {arm_state: 'Arm state (Franka)', arm_pose: 'Arm pose', arm_cmd: 'Arm commands', hand: 'Hand joints (measured)', hand_cmd: 'Hand commands', hand_current: 'Hand motor current', hand_temp: 'Hand motor temperature', glove: 'Glove (right wrist)', oakd_front_view: 'Workspace camera', oakd_wrist_view: 'Wrist camera'};
+async function loadDatasets() {
+  try {
+    const r = await (await fetch('/api/datasets', {cache: 'no-store'})).json(); DS = r.datasets;
+    if (!sesChecked) { sesChecked = true; if (!(parseInt($('ses-no').value, 10) > 0) || sessionClash()) { $('ses-no').value = nextSesNo(); saveSession(); } }   // first load: never start on a number another session owns
+    updateSession();
+    const sel = $('ds-select'), cur = sel.value || (() => { try { return localStorage.getItem('ds') || ''; } catch (e) { return ''; } })();
+    sel.innerHTML = DS.map(d => `<option value="${esc(d.name)}">${esc(d.name)} (${d.demos.length})</option>`).join('') || '<option value="">no sessions yet</option>';
+    if (DS.some(d => d.name === cur)) sel.value = cur;
+    renderDemos();
+  } catch (e) {}
+}
+function renderDemos() {
+  const d = DS.find(x => x.name === $('ds-select').value);
+  if (!d) { $('demo-table').innerHTML = ''; $('ds-info').textContent = 'No recordings yet.'; $('ds-process').disabled = true; return; }
+  $('ds-info').innerHTML = `${d.demos.length} demo${d.demos.length === 1 ? '' : 's'}, ${d.total_gb} GB on disk. ${d.todo ? `<b>${d.todo}</b> not processed or not checked yet.` : 'All processed and checked.'} Training reads a dataset version built from <code>manifest.csv</code>, not this folder.`;
+  let h = '<tr><th>Demo</th><th>Name in dataset versions</th><th>Colour</th><th class="r">Raw GB</th><th class="r">Processed GB</th><th class="r">Length</th><th class="r">Frames</th><th>Check</th><th></th></tr>';
+  for (const m of [...d.demos].reverse()) {
+    const c = m.check;
+    const chk = m.processed_gb == null ? '<span class="muted">not processed</span>' : !c ? '<span class="muted">not checked</span>' : c.ok ? '<span class="tag-ok">ok</span>' : `<span class="tag-bad" title="${esc(c.errors.join('\n'))}">problems: ${esc(c.errors[0] || '')}</span>`;
+    h += `<tr class="${PL && PL.demo === m.name && PL.dataset === d.name ? 'sel' : ''}"><td title="${esc(m.description || '')}">${esc(m.name)}${m.description ? ' <span class="muted" title="' + esc(m.description) + '">✎</span>' : ''}</td><td>${m.dataset_name ? esc(m.dataset_name) : '<span class="muted">–</span>'}</td><td>${m.colour ? esc(m.colour) : '<span class="muted">–</span>'}${m.keep && m.keep !== 'keep' ? ' <span class="muted">(' + esc(m.keep) + ')</span>' : ''}</td><td class="r">${m.raw_gb == null ? '–' : m.raw_gb.toFixed(2)}</td><td class="r">${m.processed_gb == null ? '–' : m.processed_gb.toFixed(2)}</td><td class="r">${c && c.duration_s != null ? mmss(c.duration_s) : '–'}</td><td class="r">${c && c.frames != null ? c.frames : '–'}</td><td>${chk}</td><td class="r">${m.processed_gb != null ? `<button data-demo="${esc(m.name)}">View</button>` : ''}</td></tr>`;
+  }
+  $('demo-table').innerHTML = h;
+  for (const b of $('demo-table').querySelectorAll('button')) b.onclick = () => openDemo(d.name, b.dataset.demo);
+}
+$('ds-select').onchange = () => { try { localStorage.setItem('ds', $('ds-select').value); } catch (e) {} renderDemos(); };
+$('ds-upload').onclick = async () => { $('job-details').open = true; await post('/api/upload'); };
+$('ds-process').onclick = async () => { const n = $('ds-select').value; if (!n) return; $('job-details').open = true; await post(`/api/datasets/${encodeURIComponent(n)}/process`); loadDatasets(); };
+$('job-stop').onclick = () => post('/api/job/stop');
+async function openDemo(dataset, demo) {
+  closeDemo();
+  let meta; try { const r = await fetch(`/api/demo/${encodeURIComponent(dataset)}/${encodeURIComponent(demo)}/meta`); if (!r.ok) throw 0; meta = await r.json(); } catch (e) { return toast('This demo could not be opened.'); }
+  PL = {dataset, demo, meta, i: 0, timer: null, busy: false};
+  $('player').style.display = ''; $('pl-title').textContent = `${dataset} / ${demo}`; $('pl-seek').max = Math.max(0, meta.frames - 1); $('pl-seek').value = 0;
+  const d = DS.find(x => x.name === dataset), m = d && d.demos.find(x => x.name === demo), c = m && m.check;
+  $('pl-check').innerHTML = !c ? '<div class="note warn">Not checked yet. Press "Process and check new demos".</div>' : c.ok ? '' : `<div class="note bad"><b>The check found problems:</b><br>${c.errors.map(esc).join('<br>')}</div>`;
+  const plot = $('pl-plot'); plot.style.display = c ? '' : 'none'; if (c) plot.src = `/api/demo/${encodeURIComponent(dataset)}/${encodeURIComponent(demo)}/trajectory.png`;
+  showFrame(0); renderDemos(); $('player').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+function showFrame(i) {
+  if (!PL) return; PL.i = Math.max(0, Math.min(PL.meta.frames - 1, i)); $('pl-seek').value = PL.i;
+  $('pl-time').textContent = `${mmss(PL.i / PL.meta.freq)} / ${mmss(PL.meta.frames / PL.meta.freq)} · frame ${PL.i + 1}/${PL.meta.frames}`;
+  if (PL.busy) { PL.want = PL.i; return; }
+  PL.busy = true; const probe = new Image(), me = PL;
+  const done = () => { me.busy = false; if (PL === me && me.want != null && me.want !== me.shown) { const w = me.want; me.want = null; showFrame(w); } };
+  probe.onload = () => { if (PL === me) { $('pl-img').src = probe.src; me.shown = PL.i; } done(); }; probe.onerror = done;
+  probe.src = `/api/demo/${encodeURIComponent(PL.dataset)}/${encodeURIComponent(PL.demo)}/frame/${PL.i}.jpg`;
+}
+function closeDemo() { if (PL && PL.timer) clearInterval(PL.timer); PL = null; $('player').style.display = 'none'; $('pl-play').textContent = 'Play'; }
+$('pl-close').onclick = () => { closeDemo(); renderDemos(); };
+$('pl-seek').oninput = () => showFrame(+$('pl-seek').value);
+$('pl-play').onclick = () => {
+  if (!PL) return;
+  if (PL.timer) { clearInterval(PL.timer); PL.timer = null; $('pl-play').textContent = 'Play'; return; }
+  if (PL.i >= PL.meta.frames - 1) PL.i = 0;
+  $('pl-play').textContent = 'Pause';
+  PL.timer = setInterval(() => { if (!PL) return; if (PL.i >= PL.meta.frames - 1) { clearInterval(PL.timer); PL.timer = null; $('pl-play').textContent = 'Play'; return; } showFrame(PL.i + 1); }, 1000 / PL.meta.freq);
+};
+loadDatasets().then(() => {   // optional link parameters: ?open=all opens the detail panels, ?demo=<dataset>/<demo> opens a demo
+  const q = new URLSearchParams(location.search);
+  if (q.get('open') === 'all') for (const id of ['d-hand', 'd-arm', 'd-other']) $(id).open = true;
+  const dm = (q.get('demo') || '').split('/'); if (dm.length === 2) { $('ds-select').value = dm[0]; renderDemos(); openDemo(dm[0], dm[1]); }
+});
+setInterval(() => { if (!document.hidden) loadDatasets(); }, 5000);
+
+/* ---------- run a policy ---------- */
+let POL = {runs: [], folder: ''}, PCHK = null, INF = null, polHave = false, polBusy = false, polRobot = null, polShown = '', polStatus = null;
+const stored = k => { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } };
+const store = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+const polSel = () => ({run: $('pol-run').value, ckpt: $('pol-ckpt').value});
+function setOptions(sel, html) { if (sel.dataset.html !== html) { sel.dataset.html = html; sel.innerHTML = html; return true; } return false; }   // only rebuilt when the list changed, so an open list stays open
+function fillPolicies() {
+  const run = $('pol-run'), ck = $('pol-ckpt'), locked = INF && INF.running && INF.run;
+  const wantRun = locked ? INF.run : (run.value || stored('pol_run'));
+  setOptions(run, POL.runs.map(x => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join('') || '<option value="">no runs yet</option>');
+  if (POL.runs.some(x => x.name === wantRun)) run.value = wantRun;
+  const r = POL.runs.find(x => x.name === run.value), wantCk = locked ? INF.ckpt : (ck.dataset.run === run.value && ck.value ? ck.value : stored('pol_ckpt'));
+  setOptions(ck, r ? r.checkpoints.map(c => `<option value="${esc(c.name)}">${esc(c.name.replace(/^checkpoints\//, ''))} · ${c.mb} MB</option>`).join('') : '');
+  ck.dataset.run = run.value;
+  if (r && r.checkpoints.some(c => c.name === wantCk)) ck.value = wantCk;
+  const folder = `<code>${esc(POL.folder || '')}</code>`;
+  $('pol-info').innerHTML = !r ? `No policies on this PC yet. Copy a training run into ${folder}<code>/&lt;run&gt;/</code>: its <code>config.yaml</code> and <code>checkpoints/*.pth</code>, in that layout.`
+    : `${r.algo ? esc(r.algo) + ', trained' : 'Trained'} on dataset version <b>${esc(r.dataset || 'unknown')}</b>. Runs are read from ${folder}. Every start of the policy writes a log to <code>${esc(POL.logs_folder || '')}</code> (${POL.logs_gb} GB so far; with both images in every step, about 1.4 GB per minute).`;
+}
+async function loadPolicies() {
+  if (!polHave) return;
+  try { const r = await fetch('/api/policies', {cache: 'no-store'}); if (r.ok) { POL = await r.json(); fillPolicies(); if (polStatus) renderPolicy(polStatus); } } catch (e) {}   // the buttons depend on what is selected
+}
+async function loadChecks() {
+  const {run, ckpt} = polSel(), key = run + '/' + ckpt;
+  if (!polHave || !run || !ckpt) { PCHK = null; return renderChecks(); }
+  try {
+    const r = await fetch(`/api/policies/check?run=${encodeURIComponent(run)}&ckpt=${encodeURIComponent(ckpt)}`, {cache: 'no-store'});
+    PCHK = r.ok ? await r.json() : {items: [{title: 'Policy files', status: 'bad', text: ((await r.json().catch(() => ({}))).detail) || 'The checks could not be run.'}], bad: 1, warn: 0};
+    PCHK.key = key;
+  } catch (e) { return; }
+  renderChecks();
+}
+const CHK = {ok: ['tag-ok', 'ok'], warn: ['tag-warn', 'look at this'], bad: ['tag-bad', 'does not match'], info: ['muted', 'note']};
+function renderChecks() {
+  const c = PCHK && PCHK.key === polSel().run + '/' + polSel().ckpt ? PCHK : null;
+  $('pol-checks-h').innerHTML = 'Checks: does the station match the training data?' + (!c ? '' : c.bad ? ` <span class="tag-bad">${c.bad} failed</span>` + (c.warn ? `, <span class="tag-warn">${c.warn} to look at</span>` : '') : c.warn ? ` <span class="tag-warn">${c.warn} to look at</span>, none failed` : ' <span class="tag-ok">all passed</span>');
+  const html = !c ? '' : '<tr><th>Check</th><th>Result</th><th>What was found</th></tr>' + c.items.map(i => { const [cls, label] = CHK[i.status] || CHK.info; return `<tr><td>${esc(i.title)}</td><td style="white-space:nowrap"><span class="${cls}">${label}</span></td><td>${esc(i.text)}</td></tr>`; }).join('');
+  if (polShown !== html) { polShown = html; $('pol-checks').innerHTML = html; }
+}
+const polFailed = () => (PCHK ? PCHK.items : []).filter(i => i.status === 'bad');
+const polList = items => items.map(i => '• ' + i.title + ': ' + i.text).join('\n');
+async function polLaunch(preview) {
+  const {run, ckpt} = polSel(); if (!run || !ckpt) return toast('Choose a run and a checkpoint first.');
+  await loadChecks();
+  const bad = polFailed(), warn = (PCHK ? PCHK.items : []).filter(i => i.status === 'warn');
+  if (!preview) {
+    let msg = 'Start the policy launch LIVE?\n\nThe cameras and the ORCA hand start (the hand moves to neutral). The arm stays still until you press Start policy.';
+    if (bad.length) msg += '\n\nFAILED CHECKS:\n' + polList(bad);
+    if (warn.length) msg += '\n\nTo look at:\n' + warn.map(i => '• ' + i.title).join('\n');
+    if (bad.length) msg += '\n\nStart live anyway, although a check failed?';
+    if (!confirm(msg)) return;
+  }
+  $('inference-details').open = true;
+  await post('/api/inference/start', {run, ckpt, preview, override: !preview && bad.length > 0});
+}
+async function polCmd(action, body) {
+  if (polBusy) return; polBusy = true;
+  try { const r = await post('/api/inference/cmd/' + action, body); if (r && r.note) toast(r.note, true); } finally { polBusy = false; }
+}
+async function polGo() {   // the big button: start or stop the loaded policy
+  if (!INF || !INF.running) return;
+  if (INF.policy_on || INF.init === 'moving') return polCmd('stop');
+  let override = false;
+  if (!INF.preview) {
+    await loadChecks();
+    const bad = polFailed();
+    if (!confirm('Start the policy LIVE now?\n\nThe arm and the hand move by themselves as soon as you confirm. Keep clear. One person stays at the stop button.' + (bad.length ? '\n\nFAILED CHECKS:\n' + polList(bad) + '\n\nRun anyway?' : ''))) return;
+    override = bad.length > 0;
+  }
+  polCmd('start', {override});
+}
+$('pol-preview').onclick = () => polLaunch(true);
+$('pol-live').onclick = () => polLaunch(false);
+$('pol-stop').onclick = () => post('/api/inference/stop');
+$('pol-go').onclick = polGo;
+$('pol-reset').onclick = () => polCmd('reset');
+$('pol-init').onclick = () => { if (confirm('Move the arm to the pose where the training demos start?\n\nThe arm moves by itself, slowly (about 2 cm per second), in a straight line. Keep clear and keep a hand on the stop button. Stop policy halts the move.')) polCmd('init_arm'); };
+$('pol-run').onchange = () => { store('pol_run', $('pol-run').value); fillPolicies(); store('pol_ckpt', $('pol-ckpt').value); loadChecks(); };
+$('pol-ckpt').onchange = () => { store('pol_ckpt', $('pol-ckpt').value); loadChecks(); };
+function polView(p, robot) {   // what the loaded policy is doing, for this card and for the Operate card
+  const ready = !!(robot && robot.mode === 'ready'), live = !p.preview;
+  const v = {go: 'Start policy', goCls: live ? 'rec big-btn' : 'primary big-btn', goOn: p.node_ready && (!live || ready), cls: 'idle', pillC: '', sub: ''};
+  if (p.stopping) { v.state = 'Stopping the policy launch…'; v.pill = 'Stopping…'; v.pillC = 'warn busy'; v.goOn = false; }
+  else if (!p.node_ready) { v.state = 'Loading the policy…'; v.cls = 'warn'; v.pill = 'Loading the policy…'; v.pillC = 'warn busy'; v.goOn = false; v.sub = 'The cameras and the ORCA hand start (the hand moves to neutral), then the policy is loaded onto the graphics card. This can take a minute.'; }
+  else if (p.init === 'moving') { v.state = 'Arm moving to the demos\' start pose…'; v.cls = 'warn'; v.pill = 'Arm moving'; v.pillC = 'warn busy'; v.go = 'Stop move'; v.goCls = 'rec big-btn'; v.goOn = true; v.sub = 'The arm moves by itself: keep clear.'; }
+  else if (p.policy_on) {
+    v.state = live ? 'Policy running: LIVE' : 'Policy running: preview'; v.cls = live ? 'rec' : 'ok'; v.pill = v.state; v.pillC = (live ? 'bad' : 'ok') + ' busy'; v.go = 'Stop policy'; v.goCls = 'rec big-btn'; v.goOn = true;
+    v.sub = live ? 'The policy drives the arm and the hand. Stop policy makes the arm hold its last target; it is not a safety stop.' : 'Nothing is sent to the arm or the hand. The Live view shows what the policy would command (dashed line, ring, finger marks).';
+  } else {
+    v.state = live ? 'Policy loaded: LIVE' : 'Policy loaded: preview'; v.pill = live ? 'Ready: LIVE' : 'Ready: preview'; v.pillC = live ? 'warn' : 'ok';
+    v.sub = !live ? 'Start policy: its outputs are shown in the Live view only. Nothing is sent to the arm or the hand.' : ready ? 'Start policy makes the arm and the hand move by themselves. Two people present, one at the stop button.' : 'The robot is not Ready, so the policy cannot be started live. Start or restart the controller (section 1).';
+  }
+  return v;
+}
+function renderPolicy(s) {
+  const was = polHave; polHave = (s.features || []).includes('inference');
+  const p = polHave ? s.procs.inference : null; INF = p; polRobot = s.ros && s.ros.robot; polStatus = s;
+  const ids = ['pol-run', 'pol-ckpt', 'pol-preview', 'pol-live', 'pol-stop'];
+  if (!polHave) {
+    pill($('pol-pill'), 'Not available', ''); for (const id of ids) $(id).disabled = true; $('pol-box').style.display = 'none';
+    $('pol-notes').innerHTML = '<div class="note warn">Restart APE to use this card: the running server was started before the card was added.</div>'; return;
+  }
+  if (!was) { loadPolicies().then(loadChecks); }
+  const W = (cls, html) => `<div class="note ${cls}">${html}</div>`;
+  const ext = s.external.includes('inference'), other = s.procs.recording.running || s.external.includes('teleop') || s.external.includes('recording');
+  const failedExit = !p.running && p.exit_code !== null && ![0, -2, 130].includes(p.exit_code);
+  const v = p.running ? polView(p, polRobot) : null;
+  if (v) pill($('pol-pill'), v.pill, v.pillC); else if (ext) pill($('pol-pill'), 'Running in a terminal', 'warn'); else if (failedExit) pill($('pol-pill'), 'Stopped with an error', 'bad'); else pill($('pol-pill'), 'Stopped', '');
+  const sel = polSel(), chosen = !!(sel.run && sel.ckpt);
+  if (p.running && p.run && (sel.run !== p.run || sel.ckpt !== p.ckpt)) fillPolicies();   // show what is loaded
+  $('pol-run').disabled = $('pol-ckpt').disabled = p.running;
+  $('pol-preview').disabled = $('pol-live').disabled = p.running || ext || other || !chosen;
+  $('pol-stop').disabled = !p.running || p.stopping;
+  $('pol-box').style.display = v ? '' : 'none';
+  let notes = '';
+  if (v) {
+    $('pol-state').textContent = v.state; $('pol-state').className = 'op-state ' + v.cls; $('pol-sub').textContent = v.sub;
+    $('pol-timer').textContent = p.policy_on ? mmss(p.policy_for) : '';
+    const go = $('pol-go'); if (go.textContent !== v.go) go.textContent = v.go; go.className = v.goCls; go.disabled = !v.goOn || polBusy;
+    const idle = p.node_ready && !p.policy_on && p.init !== 'moving' && !p.stopping;
+    $('pol-reset').disabled = !idle || polBusy;
+    $('pol-init').style.display = !p.preview && p.arm_init ? '' : 'none'; $('pol-init').disabled = !idle || polBusy || !(polRobot && polRobot.mode === 'ready');
+    if (!p.node_ready && !p.stopping && p.age > 120) notes += W('warn', 'Loading takes unusually long. Open the Log below: the policy may have failed to load.');
+    if (p.policy_on && !p.producing && p.policy_for > 2) notes += W('bad', '<b>The policy is started, but produces no actions.</b> ' + (p.last_pause ? 'The inference node reports: <code>' + esc(p.last_pause.text) + '</code>. ' : '') + 'It only acts when both camera images, the arm pose and the hand joints are all newer than 0.2 s. Check that the Franka controller runs (section 1) and that both cameras show an image.');
+    else if (p.policy_on && p.last_pause && p.last_pause.age < 15) notes += W('warn', `The policy skipped steps ${p.pauses > 1 ? 'several times' : 'once'} since it was started, last ${Math.round(p.last_pause.age)} s ago: <code>${esc(p.last_pause.text)}</code>. Each time it forgets its plan and starts a new one.`);
+    if (p.policy_on && p.slow) notes += W('warn', `The policy needed more than 0.2 s for a step ${p.slow} time${p.slow === 1 ? '' : 's'} since it was started. The graphics card is busy or too slow for this policy; the motion will stall.`);
+    if (p.init.startsWith('failed')) notes += W('warn', 'The arm did not reach the demos\' start pose: ' + esc(p.init.slice(8)) + '.');
+    if (p.init === 'done' && !p.policy_on) notes += W('warn', 'The arm is at the demos\' start pose.').replace('note warn', 'note" style="background:var(--ok-bg); color:var(--ok)');
+    if (!p.preview && s.disk_free_gb < 20) notes += W('warn', `Only ${s.disk_free_gb} GB of disk space left, and a running policy logs about 1.4 GB per minute.`);
+  } else {
+    if (ext) notes += W('warn', 'A policy launch is running in a terminal outside this page. Stop it there (Ctrl-C) before starting one here.');
+    else if (other) notes += W('warn', 'The station launch is running. Stop it (section 2) before starting a policy: both start the hand and camera nodes.');
+    if (failedExit) notes += W('bad', 'The policy launch ended with an error. Open the Log to see why.');
+  }
+  if (p.note) notes += W('bad', esc(p.note));
+  if (p.problems.length) notes += W('bad', '<b>The policy log shows problems:</b><br>' + p.problems.map(x => '<code>' + esc(x) + '</code>').join('<br>'));
+  $('pol-notes').innerHTML = notes;
+  renderChecks();
+}
+setInterval(() => { if (!document.hidden && polHave) loadPolicies().then(loadChecks); }, 4000);
+
+/* ---------- status ---------- */
+const NUC = {
+  disconnected: ['Disconnected', '', 'Before starting: in Franka Desk the brakes are unlocked, FCI is active and no error is shown.'],
+  connecting:   ['Connecting…', 'warn busy', 'Connecting to the NUC.'],
+  password:     ['Waiting for password', 'warn busy', 'Type the NUC password in the box below and press Enter.'],
+  auth:         ['Checking password…', 'warn busy', 'The NUC is checking the password.'],
+  host:         ['Connected, entering container…', 'warn busy', 'Logged in on the NUC.'],
+  container:    ['Connected, controller stopped', '', 'Logged in and inside the container. Start needs no password now.'],
+  launching:    ['Starting controller…', 'warn busy', 'The controller is starting. Wait for "Configured and activated".'],
+  running:      ['Controller running', 'ok', 'Leave it running for the whole session.'],
+};
+const ROBOT = {
+  ready:        ['Ready', 'ok', 'The arm accepts commands.'],
+  idle:         ['Idle', 'idle', 'The robot is on, but no controller is commanding it.'],
+  reflex:       ['Reflex', 'bad', 'A safety error stopped the arm.'],
+  user_stopped: ['User stopped', 'bad', 'The black stop button is pressed.'],
+  guiding:      ['Guiding', 'warn', 'The arm is being moved by hand.'],
+  recovering:   ['Recovering', 'warn', 'Automatic error recovery is running.'],
+  other:        ['Other', 'warn', 'The robot reports an unusual mode.'],
+};
+const RECOVER = `<ol class="steps">
+  <li>Fully release the black button. Check that Desk shows no error and FCI is active.</li>
+  <li>Press <b>Restart controller</b>: <button class="do-restart">Restart controller</button> It pauses teleop if needed, stops the controller and starts it again.</li>
+  <li>Wait for <b>Ready</b>, then start teleop again.</li></ol>`;
+
+function pill(el, text, cls) { el.textContent = text; el.className = 'pill ' + (cls || ''); }
+function check(k, v, cls) { return `<div class="check"><div class="k">${esc(k)}</div><div class="v ${cls || ''}">${esc(v)}</div></div>`; }
+
+function renderExtras(s) {
+  const o = s.operate || {}, ck = (s.ros && s.ros.checks) || {};
+  if ((o.rec === 'recording' && lastRec !== 'recording') || (o.teleop_running && !lastTeleop) || (o.policy_running && !lastPolicy)) { trail = []; trailCmd = []; }   // a fresh path for each demo and each time teleop or a policy starts again
+  lastRec = o.rec; lastTeleop = !!o.teleop_running; lastPolicy = !!o.policy_running;
+  const cams = ck.cameras || {};
+  $('live-note').textContent = (cams.front_view || cams.wrist_view) ? '' : 'Cameras are off: they run with the station launch (section 2) or a policy launch (section 4).';
+  const jr = s.procs.job;
+  pill($('job-pill'), jr.running ? (jr.stopping ? 'Stopping…' : (s.job_dataset === 'upload' ? 'Uploading…' : `Processing ${s.job_dataset || ''}…`)) : (jr.exit_code != null && jr.exit_code !== 0 ? 'Last run had errors' : 'Idle'), jr.running ? 'warn busy' : (jr.exit_code != null && jr.exit_code !== 0 ? 'bad' : ''));
+  $('ds-process').disabled = jr.running || !$('ds-select').value || o.rec === 'recording' || o.rec === 'saving';
+  const ft = s.features || [];
+  $('lb-note').innerHTML = ft.includes('orientation') ? '' : `<div class="note warn" style="margin-top:8px">Restart APE to store ${ft.includes('description') ? 'the cube orientation' : ft.includes('meta') ? 'the cube orientation and the description' : 'the lighting label, the cube orientation, the description and the settings file of each demo'}. Until then it is not saved.</div>`;
+  showPreview();
+  $('ds-upload').disabled = jr.running || o.rec === 'recording' || o.rec === 'saving';
+  $('ds-upload').title = s.hf_repo ? `Uploads to ${s.hf_repo}: raw and processed recordings that are not there yet, manifest.csv and the dataset version lists` : $('ds-upload').title;
+  $('job-stop').disabled = !jr.running || jr.stopping;
+  if (renderExtras.jobWas && !jr.running) loadDatasets();
+  renderExtras.jobWas = jr.running;
+  const cal = s.calibration || {};
+  $('calib-info').textContent = cal.exists ? `Hand calibration file last written ${new Date(cal.written * 1000).toLocaleString()}.` : 'No hand calibration file: the hand will calibrate itself at the next launch start.';
+  $('calib-btn').disabled = !cal.exists || s.procs.recording.running || s.external.length > 0 || !!(ck.services || {}).hand_torque;
+  if ($('d-other').open) {
+    const R = s.rates || {};
+    let h = '<tr><th>Stream</th><th class="r">Messages / s</th><th class="r">Largest gap (2 s)</th><th class="r">Last message</th></tr>';
+    for (const k in STREAMS) { const r = R[k]; h += `<tr><td>${STREAMS[k]}</td><td class="r">${r && r.age < 2 ? r.hz.toFixed(1) : '–'}</td><td class="r">${r && r.max_gap_ms != null && r.age < 2 ? r.max_gap_ms + ' ms' : '–'}</td><td class="r">${!r ? 'never' : r.age < 2 ? 'now' : r.age.toFixed(0) + ' s ago'}</td></tr>`; }
+    h += `<tr><td>Glove: real updates</td><td class="r">${ck.glove_update_hz != null ? ck.glove_update_hz.toFixed(1) : '–'}</td><td></td><td></td></tr>`;
+    $('rate-table').innerHTML = h;
+    $('node-list').textContent = (ck.nodes || []).join(', ') || 'none';
+  }
+}
+function render(s) {
+  $('offline').style.display = 'none';
+  renderOperate(s); renderExtras(s);
+  try { renderPolicy(s); delete document.body.dataset.policyError; } catch (e) { console.error('policy card', e); document.body.dataset.policyError = String(e && e.stack || e).slice(0, 300); }   // a fault here must not stop the rest of the page
+  /* NUC */
+  const n = s.procs.nuc, [nt, nc, nh] = NUC[n.state] || NUC.disconnected;
+  const ctrlHere = ['launching', 'running'].includes(n.state);
+  const ctrlElsewhere = !ctrlHere && !!(s.ros && s.ros.robot);   // robot state arrives, but not from our session
+  const rb = s.ros && s.ros.robot, ck = (s.ros && s.ros.checks) || {}, op = s.operate || {};
+  const ctrlUp = n.state === 'running' || ctrlElsewhere;
+  const notControlling = ctrlUp && rb && rb.mode !== 'ready';
+  if (notControlling) pill($('nuc-pill'), 'Running, but not controlling the arm: restart needed', 'bad');
+  else if (ctrlElsewhere) pill($('nuc-pill'), 'Running in a terminal', 'warn'); else pill($('nuc-pill'), nt, nc);
+  $('nuc-hint').textContent = nh;
+  $('nuc-start').disabled = ctrlElsewhere || ['launching', 'running', 'connecting', 'auth', 'host'].includes(n.state);
+  const askPw = n.state === 'password';
+  $('nuc-pw-form').hidden = !askPw;
+  if (askPw && !render.askedPw) $('nuc-pw').focus();
+  if (!askPw) $('nuc-pw').value = '';
+  render.askedPw = askPw;
+  $('nuc-stop').disabled = !['launching', 'running'].includes(n.state);
+  $('nuc-restart').disabled = n.state !== 'running' || !!(s.ros && s.ros.robot && s.ros.robot.mode === 'user_stopped');
+  $('nuc-disconnect').disabled = !n.running || ['launching', 'running'].includes(n.state);
+  let notes = '';
+  const W = (cls, html) => `<div class="note ${cls}">${html}</div>`;
+  if (notControlling) {
+    const why = {user_stopped: 'The black stop button was pressed (or still is).', reflex: 'A reflex stopped the arm' + (rb.current_errors.length ? ' (' + esc(rb.current_errors.join(', ')) + ')' : rb.last_motion_errors.length ? ' (' + esc(rb.last_motion_errors.join(', ')) + ')' : '') + '.',
+      idle: 'Its motion command ended' + (rb.last_motion_errors.length ? ' with ' + esc(rb.last_motion_errors.join(', ')) : '') + '.', guiding: 'The arm is in guiding mode.'}[rb.mode] || '';
+    notes += W('bad', `<b>The controller process is running, but it no longer controls the arm.</b> ${why} It does not take control back by itself. ` +
+      (ctrlElsewhere ? 'Restart it in its terminal (Ctrl-C, then launch again).' : (rb.mode === 'user_stopped' ? 'Release the black button fully, then press' : 'Press') + ' <b>Restart controller</b>.'));
+  }
+  if (n.state === 'running' && !rb && n.state_age > 5) notes += W('bad', '<b>The controller was started, but no robot data arrives.</b> Open the terminal below for errors, and check the network cable to the NUC.');
+  if (n.state === 'launching' && n.state_age > 30) notes += W('warn', 'Starting takes unusually long. Open the terminal below: the controller may be waiting for the robot (brakes locked, FCI off, stop button pressed).');
+  if (n.state === 'password' && n.auth_failures) notes += W('bad', '<b>Wrong password.</b> Type it again.');
+  if (['connecting', 'auth'].includes(n.state) && n.state_age > 10) notes += W('warn', 'The login takes unusually long. Open the terminal below to see what ssh is waiting for (for example a yes/no question about a new NUC), and answer it there.');
+  if (n.state === 'host' && n.state_age > 15) notes += W('warn', 'Logged in, but the container did not open. Open the terminal below and type the missing step, or press Disconnect and start again.');
+  if (ctrlUp && rb && rb.mode === 'ready' && rb.success_rate < 0.9) notes += W('warn', `The control loop is missing cycles (success rate ${rb.success_rate.toFixed(2)}). The arm may stop with a communication error. Close heavy programs on the NUC and check the network cable.`);
+  if (op.teleop_running && !ctrlUp) notes += W('warn', 'Teleop is sending arm commands, but no controller is running. <b>Pause teleop before starting the controller</b>, so the arm does not jump.');
+  if (ctrlElsewhere) notes += `<div class="note warn">The controller is already running, started in a terminal outside this page. To manage it here, stop it there first (Ctrl-C in the NUC terminal).</div>`;
+  if (n.note) notes += `<div class="note warn">${esc(n.note)}</div>`;
+  if (n.warnings.length) notes += `<div class="note bad"><b>The controller log shows problems:</b><br>${n.warnings.map(w => '<code>' + esc(w) + '</code>').join('<br>')}</div>`;
+  $('nuc-notes').innerHTML = notes;
+
+  /* local launches */
+  const anyLocal = s.procs.recording.running;
+  for (const name of ['recording']) {
+    const p = s.procs[name], ext = s.external.includes(name);
+    const handOnly = p.mode === 'hand_only';
+    if (p.running) pill($(name + '-pill'), p.stopping ? 'Stopping…' : handOnly ? 'Running: hand only' : 'Running', p.stopping ? 'warn busy' : 'ok');
+    else if (ext) pill($(name + '-pill'), 'Running in a terminal', 'warn');
+    else if (p.exit_code !== null && p.exit_code !== 0 && p.exit_code !== -2 && p.exit_code !== 130) pill($(name + '-pill'), 'Stopped with an error', 'bad');
+    else pill($(name + '-pill'), 'Stopped', '');
+    const blocked = anyLocal || s.external.includes('teleop') || s.external.includes('recording') || !!(s.procs.inference && s.procs.inference.running) || s.external.includes('inference');
+    $(name + '-start').disabled = blocked; $('handonly-start').disabled = blocked;
+    $(name + '-stop').disabled = !p.running || p.stopping;
+    let ln = ext ? W('warn', `A ${name} launch is running in a terminal outside this page. Stop it there (Ctrl-C) before starting one here.`) : '';
+    const sv = ck.services || {};
+    if (p.running && !p.stopping && p.age > 25) {
+      if (p.hand && !sv.hand_torque) ln += W('bad', '<b>The ORCA hand controller is not running.</b> It probably crashed at start: check the Log for "no motor bus" (USB cable unplugged or hand power off), then stop and start this launch again.');
+      if (!sv.hand_follow) ln += W('bad', 'The retargeter (glove-to-hand mapping) is not running. Check the Log, then restart this launch.');
+      if (!sv.resume && !handOnly) ln += W('bad', 'The arm teleop node is not running. Check the Log, then restart this launch.');
+      if (!ck.glove_publish_hz) ln += W('warn', '<b>No glove data.</b> Check that Rokoko Studio is running on the Rokoko laptop, the gloves are on and streaming is enabled.');
+      else if (ck.glove_update_hz < 1) ln += W('warn', '<b>The glove data is frozen</b> (same values repeated). Check the gloves and the coil, and that the glove is in range.');
+      else if (ck.glove_update_hz < 8) ln += W('warn', `Glove data updates only ${ck.glove_update_hz.toFixed(0)} times per second. Motion will feel jerky; move slowly.`);
+      if (name === 'recording' && !handOnly) {
+        if (!sv.rec_start) ln += W('bad', 'The logger is not running, so nothing can be recorded. Check the Log, then restart this launch.');
+        const cams = ck.cameras || {}, missing = Object.keys(cams).filter(c => !cams[c]).map(c => c.replace('_view', ''));
+        if (missing.length) ln += W('bad', `<b>No image from the ${missing.join(' and ')} camera.</b> Check the USB cable (use a USB 3 port), then restart this launch. Demos recorded now would be unusable.`);
+      }
+    }
+    if (!p.running && p.exit_code !== null && ![0, -2, 130].includes(p.exit_code)) ln += W('bad', 'This launch ended with an error. Open the Log to see why.');
+    $(name + '-notes').innerHTML = ln;
+  }
+  /* operate card: situations that need attention */
+  let on = '';
+  const sv2 = ck.services || {};
+  if ((ck.nodes || []).includes('runner_node')) on += W('warn', '<b>The keyboard runner is also running.</b> Close it (Ctrl-C in its terminal): it and this page would both send pause and resume.');
+  if (op.teleop_running && rb && rb.mode !== 'ready') on += W('bad', '<b>Teleop is running, but the arm is not following</b> (robot: ' + esc(rb.mode.replace('_', ' ')) + '). Pause teleop now, then recover the robot.');
+  if (op.teleop_running && !ck.glove_publish_hz) on += W('bad', '<b>Teleop is running without glove data.</b> Pause teleop and check the gloves.');
+  if (op.rec === 'recording' && op.rec_elapsed > 300) on += W('warn', 'This recording has been running for over 5 minutes. A demo of that length takes about ' + Math.round(op.rec_elapsed / 74 * 7) + ' GB.');
+  if (sv2.rec_start && s.disk_free_gb < 60) on += W(s.disk_free_gb < 20 ? 'bad' : 'warn', `Only ${s.disk_free_gb} GB of disk space left: room for roughly ${Math.max(0, Math.floor(s.disk_free_gb / 8))} more demos (about 7 GB each). Process and remove old raw files, or ask before recording more.`);
+  if (sv2.rec_start && !op.dataset && op.rec === 'idle') on += '';
+  if (!op.torque && sv2.hand_torque && (op.teleop_running || op.hand_following)) on += W('warn', 'Hand motor torque is off: the fingers are limp and will not follow the glove.');
+  if (op.torque && sv2.hand_torque && !op.teleop_running && !op.hand_following && !op.moving) on += W('warn', 'Hand motor torque is on while teleop is paused: the motors keep heating. Switch it off unless you need it.');
+  for (const nl of (op.near_limit || [])) on += W('warn', `<b>Arm joint ${nl.joint} is only ${nl.margin.toFixed(0)}° from its limit.</b> The arm may stop following or fail to turn the hand as commanded. Untwist the arm: see Arm details.`);
+  if (op.accurate) on += W('warn', 'Accurate mode is on: the arm moves 60% of your hand motion.');
+  $('op-attn').innerHTML = on;
+  $('rec-path').textContent = s.datasets_dir + '/' + ($('rec-name').value.trim() || '…') + '/';
+
+  /* robot */
+  const ros = s.ros || {}, r = ros.robot, c = ros.checks || {};
+  let big, cls, sub, help = '';
+  if (!ros.ros_ok) { big = 'ROS not available'; cls = 'bad'; sub = ros.ros_error || 'The status reader is starting…'; }
+  else if (!r) { big = 'No data'; cls = 'idle'; sub = 'The NUC controller is not running, so the robot reports nothing.'; }
+  else {
+    [big, cls, sub] = ROBOT[r.mode] || ROBOT.other;
+    if (r.current_errors.length) sub += ' Error: ' + r.current_errors.join(', ') + '.';
+    if (r.mode === 'reflex' || r.mode === 'user_stopped') help = `<div class="note bad"><b>The controller does not resume by itself.</b>${RECOVER}</div>`;
+    else if (r.mode === 'idle') help = `<div class="note warn">Start (or restart) the controller below.${r.last_motion_errors.length ? ' Last motion ended with: <b>' + esc(r.last_motion_errors.join(', ')) + '</b>.' : ''}</div>`;
+  }
+  $('robot-big').textContent = big; $('robot-big').className = 'big ' + cls; $('robot-sub').textContent = sub; $('robot-help').innerHTML = help;
+  pill($('hdr-robot'), 'Robot: ' + big, cls === 'idle' ? '' : cls);
+
+  let h = '';
+  if (r) h += check('Control success rate', r.success_rate.toFixed(2), r.mode !== 'ready' ? '' : r.success_rate > 0.95 ? 'ok' : 'warn');
+  h += check('Controller listening for commands', c.controller_listening ? 'yes' : 'no', c.controller_listening ? 'ok' : '');
+  h += check('Teleop node', c.teleop_publishing ? 'running' : 'not running', c.teleop_publishing ? 'ok' : '');
+  const g = c.glove_update_hz || 0;
+  h += check('Glove data (right wrist)', c.glove_publish_hz ? `${g.toFixed(1)} real updates/s` : 'no data', !c.glove_publish_hz ? '' : g >= 10 ? 'ok' : 'warn');
+  h += check('Free disk space', s.disk_free_gb + ' GB', s.disk_free_gb < 30 ? 'bad' : s.disk_free_gb < 80 ? 'warn' : '');
+  $('checks').innerHTML = h;
+}
+
+async function refresh() {
+  try { const r = await fetch('/api/status', {cache: 'no-store'}); render(await r.json()); }
+  catch (e) { $('offline').style.display = 'block'; }
+}
+refresh(); setInterval(refresh, 1000);
+// The robot's address is station-specific and not in git: static/local/station.json holds it (see README, section Start)
+fetch('/static/local/station.json', {cache: 'no-store'}).then(r => r.ok ? r.json() : {}).then(c => {
+  if (!/^[0-9A-Za-z.:-]+$/.test(c.robot_ip || '')) return;
+  $('desk-link').href = `https://${c.robot_ip}/desk/`;
+  $('desk-link').title = 'Franka Desk: brakes, FCI, errors (opens in a new tab)';
+}).catch(() => {});
+</script>
+</body>
+</html>

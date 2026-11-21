@@ -108,7 +108,7 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
      --cfg_file "$(ros2 pkg prefix --share experiments)/cfgs/logger/datacollection_right.yaml"
    ```
    Processed files keep the raw file names. Without `--output_folder` the output goes to a sibling folder `<raw_folder>_processed_10hz_lzf/`. The script name really is spelled `syncronize_data.py`.
-   The data layout (`data/raw`, `data/processed`, `data/datasets`, `manifest.csv`), dataset versions and the Hugging Face upload are described in `rwr_il/CLAUDE.md`, section "Data organisation and transfer"; the tool is `rwr_il/scripts/rwr_data.py`. APE (`~/Projects/ape_ui`) records, processes, labels and uploads in this layout.
+   The data layout (`data/raw`, `data/processed`, `data/datasets`, `manifest.csv`), dataset versions and the Hugging Face upload are described in `rwr_il/CLAUDE.md`, section "Data organisation and transfer"; the tool is `rwr_il/scripts/rwr_data.py`. APE (`ape_ui/` in this repo) records, processes, labels and uploads in this layout.
 8. **Inspect**: `experiments/scripts/inspect_demonstration.py`, `plot_trajectories.py`, `visualize_videos.py`, or the myHDF5 website.
 9. **Train** in `rwr_il` (see that repo's `CLAUDE.md`).
 10. **Deploy**:
