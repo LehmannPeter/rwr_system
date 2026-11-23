@@ -158,6 +158,11 @@ browser tab stops nothing.
   `tests/make_policy_config.py` writes a training `config.yaml` for it without training.
   Tests import `server.py`, so a test that calls a NUC endpoint opens a real ssh connection
   to the NUC unless it replaces `nuc.start_controller` first (as `test_inference.py` does).
+- *Prediction time* in the policy card (shown while a policy runs, also in preview): the typical and the slowest time of a
+  prediction over the last 10 s, and a bar for the oldest camera image or robot reading at the end of the slowest prediction,
+  against the inference node's 200 ms limit (dashed line). Green below 150 ms, amber above, red when a step was dropped.
+  It needs the `/policy_inference/timing` topic that was added to `rwr_system/experiments/model_inference_node.py`;
+  with an older node the meter stays hidden. `summarise_timing` in `server.py` does the arithmetic.
 - The policy card reads `APE_POLICY_DIR` (default `~/rwr_humble_ws/policies`). The checks are
   in `policy_checks.py`.
 - Data layout (since 2026-11-21): section 2 takes a session number and an operator; the

@@ -71,6 +71,15 @@ label { color: var(--muted); font-size: 14px; display: inline-flex; align-items:
 .note { margin-top: 10px; padding: 9px 12px; border-radius: 8px; font-size: 14px; }
 .note.warn { background: var(--warn-bg); color: var(--warn); }
 .note.bad { background: var(--bad-bg); color: var(--bad); }
+/* policy card: how old the readings are when a prediction is finished, against the inference node's limit (at 80% of the bar) */
+.lat { margin-top: 12px; max-width: 560px; font-size: 14px; }
+.lat-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+.lat-bar { position: relative; height: 14px; margin-top: 6px; border-radius: 4px; background: var(--idle-bg); overflow: hidden; }
+.lat-fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--ok); }
+.lat-fill.warn { background: var(--warn); } .lat-fill.bad { background: var(--bad); }
+.lat-mark { position: absolute; top: 0; bottom: 0; width: 3px; background: var(--ink); }
+.lat-limit { position: absolute; top: 0; bottom: 0; left: 80%; border-left: 2px dashed var(--bad); }
+.lat-scale { display: flex; justify-content: space-between; width: 80%; color: var(--muted); font-size: 12px; }
 .note code, .muted code { font-size: 12.5px; word-break: break-all; }
 .term { background: var(--term); border-radius: 8px; padding: 8px; margin-top: 12px; height: 340px; overflow: hidden; }
 .term.small { height: 260px; }
@@ -330,6 +339,12 @@ input[type=range] { width: 100%; }
       <div class="op-state idle" id="pol-state"></div>
       <div class="op-timer" id="pol-timer"></div>
       <div class="muted" id="pol-sub"></div>
+      <div id="pol-lat" class="lat" hidden title="Measured by the inference node at every policy step. A prediction is a step in which the model runs; the steps in between read the stored plan. The inference node drops the action when any camera image or robot reading is older than the limit by the time the prediction is finished.">
+        <div class="lat-head"><b>Prediction time</b> <span id="pol-lat-text"></span></div>
+        <div class="lat-bar"><div class="lat-fill" id="pol-lat-fill"></div><div class="lat-mark" id="pol-lat-mark"></div><div class="lat-limit"></div></div>
+        <div class="lat-scale"><span>0</span><span id="pol-lat-limit"></span></div>
+        <div class="muted" id="pol-lat-sub"></div>
+      </div>
       <div class="row" style="margin-top:10px">
         <button class="primary big-btn" id="pol-go">Start policy</button>
         <button id="pol-init" title="The arm moves slowly (2 cm per second) to the center pose: the same pose as Move to center in the Operate card.">Move to center</button>
@@ -373,6 +388,22 @@ input[type=range] { width: 100%; }
 <script src="/static/vendor/xterm-addon-fit.js"></script>
 <script>
 const $ = id => document.getElementById(id);
+// Policy card: the prediction time meter. The bar is the oldest reading at the end of the slowest prediction of the
+// last 10 s, the black mark is the typical prediction time, the dashed line is the inference node's limit.
+function polLatency(p) {
+  const t = p.timing, box = $('pol-lat');
+  box.hidden = !(p.policy_on && t);
+  if (box.hidden) return;
+  const pct = ms => Math.min(100, 80 * ms / t.limit_ms) + '%';
+  const cls = t.dropped || t.age_max_ms > t.limit_ms ? 'bad' : t.age_max_ms > 0.75 * t.limit_ms ? 'warn' : '';
+  $('pol-lat-fill').style.width = pct(t.age_max_ms); $('pol-lat-fill').className = 'lat-fill ' + cls;
+  $('pol-lat-mark').style.left = pct(t.predict_ms);
+  $('pol-lat-limit').textContent = t.limit_ms + ' ms limit';
+  $('pol-lat-text').textContent = `${t.predict_ms} ms typical, ${t.predict_max_ms} ms slowest in the last 10 s (${t.predictions} prediction${t.predictions === 1 ? '' : 's'})`;
+  $('pol-lat-sub').textContent = `Oldest reading when a prediction was finished: ${t.age_max_ms} ms of ${t.limit_ms} ms allowed. `
+    + (t.dropped_total ? `${t.dropped_total} step${t.dropped_total === 1 ? '' : 's'} dropped since the policy was started. ` : 'No step dropped since the policy was started. ')
+    + `Slowest prediction since then: ${t.predict_max_total_ms} ms.`;
+}
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 function toast(msg, info) {
@@ -891,6 +922,7 @@ function renderPolicy(s) {
   if (v) {
     $('pol-state').textContent = v.state; $('pol-state').className = 'op-state ' + v.cls; $('pol-sub').textContent = v.sub;
     $('pol-timer').textContent = p.policy_on ? mmss(p.policy_for) : '';
+    polLatency(p);
     const go = $('pol-go'); if (go.textContent !== v.go) go.textContent = v.go; go.className = v.goCls; go.disabled = !v.goOn || polBusy;
     const idle = p.node_ready && !p.policy_on && p.init !== 'moving' && !p.stopping;
     $('pol-reset').disabled = !idle || polBusy;

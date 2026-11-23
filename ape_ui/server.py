@@ -372,6 +372,29 @@ class ControlError(Exception):
     pass
 
 
+def summarise_timing(samples, now, window=10.0, since=None):
+    """samples: (arrival time, step ms, oldest observation ms, allowed ms, model ran, published) per policy step.
+    A step in which the model ran is a "prediction"; the others read the stored plan and take almost no time."""
+    recent = [s for s in samples if now - s[0] <= window]
+    if not recent:
+        return None
+    runs = [s for s in recent if s[4]] or recent
+    times = sorted(s[1] for s in runs)
+    session = [s for s in samples if since is None or s[0] >= since]
+    return {
+        "limit_ms": round(recent[-1][3]),
+        "predict_ms": round(times[len(times) // 2]),          # typical time of one prediction
+        "predict_max_ms": round(times[-1]),
+        "age_max_ms": round(max(s[2] for s in runs)),         # oldest reading when a prediction was finished: this is what the limit applies to
+        "predictions": len(runs),
+        "steps": len(recent),
+        "dropped": sum(1 for s in recent if not s[5]),
+        "dropped_total": sum(1 for s in session if not s[5]),
+        "predict_max_total_ms": round(max((s[1] for s in session if s[4]), default=0)),
+        "age": round(now - recent[-1][0], 1),
+    }
+
+
 class InferenceProc(PtyProcess):
     """The policy inference launch. The inference node does not report its state on a topic,
     so what it is doing is read from its log."""
@@ -459,6 +482,7 @@ class InferenceProc(PtyProcess):
             last_pause={"age": time.time() - self.last_pause[0], "text": self.last_pause[1]} if self.last_pause else None,
             node_ready=self.node_ready(),
             producing=bool(monitor and monitor.policy_running),
+            timing=monitor.policy_timing(since=self.policy_since) if monitor and self.policy_on and self.running else None,
         )
         return d
 
@@ -499,6 +523,7 @@ class RosMonitor:
         self.tele = {}       # latest values per stream, for the live panels
         self.stamps = {}     # stream name -> recent arrival times, for the rates
         self.frames = {}     # camera name -> (arrival time, latest Image message)
+        self.timing = []     # policy steps: (arrival time, step ms, oldest observation ms, allowed ms, model ran, published)
         self.move_until = 0.0  # a smooth move started from this page is in progress until then
         self.move_what = ""
         self._clients = {}
@@ -637,6 +662,12 @@ class RosMonitor:
 
             node.create_subscription(PoseStamped, "/policy_inference/actions_arm", on_policy_arm, 10)
             node.create_subscription(Float32MultiArray, "/policy_inference/actions_hand", floats("policy_hand", 4), 10)
+
+            def on_policy_timing(msg):   # one per policy step, from the inference node
+                if len(msg.data) >= 5:
+                    self.timing = (self.timing + [(time.time(), *[float(v) for v in msg.data[:5]])])[-3000:]
+
+            node.create_subscription(Float32MultiArray, "/policy_inference/timing", on_policy_timing, 50)
             self._String = String
             self._policy_pub = node.create_publisher(String, POLICY_COMMAND_TOPIC, 10)
             from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -740,6 +771,11 @@ class RosMonitor:
         msg = self._String()
         msg.data = text
         self._policy_pub.publish(msg)
+
+    def policy_timing(self, window=10.0, since=None):
+        """How long the policy's steps took over the last `window` seconds, and since `since` (when the policy was started).
+        None while no step was reported, e.g. with an inference node from before the timing topic existed."""
+        return summarise_timing(self.timing, time.time(), window, since)
 
     def policy_listeners(self):
         """Nodes listening for policy commands: the inference node does once its policy is loaded."""
@@ -1318,7 +1354,7 @@ def status():
         "disk_free_gb": round(usage.free / 1e9, 1),
         "datasets_dir": str(RAW),
         "hf_repo": station.hf_repo(),
-        "features": ["lighting", "meta", "description", "orientation", "inference"],
+        "features": ["lighting", "meta", "description", "orientation", "inference", "timing"],
         "time": time.time(),
     }
 

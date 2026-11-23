@@ -150,7 +150,7 @@ Images are sampled by nearest timestamp; poses are interpolated linearly with sl
 ## The inference node (`experiments/model_inference_node.py`)
 
 - Control rate is hard-coded: `self.control_freq_hz = 10`. The handout requires this to match the data frequency, so if the data is resampled at another rate, change both.
-- Observations older than `2 / control_freq_hz` (0.2 s) cause the step to be skipped and the policy state to be reset, with a "Policy output paused" warning. A slow GPU therefore shows up as stalls, not as slow motion.
+- Observations older than `2 / control_freq_hz` (0.2 s) cause the step to be skipped and the policy state to be reset, with a "Policy output paused" warning. A slow GPU therefore shows up as stalls, not as slow motion. Since 2026-11-23 the node publishes one `Float32MultiArray` per policy step on `/policy_inference/timing` (also in preview): step time in ms, age of the oldest observation when the step was finished in ms, the allowed age in ms, 1 if the model ran in that step, 1 if the action was published. APE's policy card shows it as *Prediction time*. Not yet run on the Robot PC.
 - Images are resized to `rgb_resize_size` (224×224) and scaled to [0, 1]. Any crop or rotation applied at training time must be mirrored in `rgb_process_dict` in the inference config.
 - Arm observations whose `frame_id` differs from `arm_command_frame` (`world`) are rejected.
 - Actions are published on `/policy_inference/actions_arm` and `/policy_inference/actions_hand` always, and relayed to the real controllers unless `preview:=true`. Use preview first with a new checkpoint.
