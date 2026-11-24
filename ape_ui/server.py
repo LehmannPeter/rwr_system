@@ -38,6 +38,7 @@ if sys_path_added not in sys.path:
     sys.path.insert(0, sys_path_added)
 from station_data import CAMERAS, DataError, Station, archive_settings, rotate_for_display, safe
 from policy_checks import Policies, PolicyError
+from eval_trials import EvalError, EvalTrials, LiveTracker
 WORKSPACE = Path(os.environ.get("RWR_WS", Path.home() / "rwr_humble_ws"))
 DATA = WORKSPACE / "data"  # raw/<session>/, processed/<session>_10hz/, datasets/<version>/, manifest.csv
 RAW = DATA / "raw"
@@ -47,6 +48,9 @@ POLICIES = Path(os.environ.get("APE_POLICY_DIR", WORKSPACE / "policies"))
 policies = Policies(WORKSPACE, DATA, POLICIES, station.hand_cfg_dir)
 INFERENCE_LOGS = WORKSPACE / "inference_logs"  # written by the inference node, relative to the launch directory
 POLICY_COMMAND_TOPIC = "/model_inference_command"
+# Evaluation of policy runs: one folder per run with the videos, the signals and trial.json (eval_trials.py)
+evals = EvalTrials(DATA / "eval", CAMERAS)
+live = LiveTracker(CAMERAS[0])   # counts placed cubes from the workspace camera while a policy launch runs
 
 ROS_ENV = {"ROS_DOMAIN_ID": os.environ.get("APE_ROS_DOMAIN_ID", "7"), "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp"}
 SIDE = "right"
@@ -419,6 +423,7 @@ class InferenceProc(PtyProcess):
         self._rest = ""
         self._seen_none = False    # no listener of a previous launch is left on the command topic
         self._init_asked = None    # when APE asked for the move to the center pose, until the node confirms it
+        self.log_file = None       # the inference node's own log of the current policy start
 
     def begin(self, argv, run, ckpt, preview, arm_init, init_pose=None):
         if self.running:
@@ -432,6 +437,8 @@ class InferenceProc(PtyProcess):
         lines = (self._rest + ANSI.sub("", data.decode(errors="replace")).replace("\r", "")).split("\n")
         self._rest = lines.pop()[-2000:]
         for line in lines:
+            if "Started new log file:" in line:
+                self.log_file = line.split("Started new log file:", 1)[1].strip()
             if "Policy started." in line:
                 self.policy_on, self.policy_since, self.pauses, self.last_pause, self.slow, self.note = True, time.time(), 0, None, 0, ""
             elif "Policy stopped." in line:
@@ -583,6 +590,11 @@ class RosMonitor:
                     "last_motion_errors": active(msg.last_motion_errors),
                 }
                 self.robot_stamp = time.time()
+                if evals.rec is not None:
+                    fr = self.tele["franka"]
+                    evals.feed("franka_q", fr["q"]), evals.feed("franka_dq", fr["dq"]), evals.feed("franka_tau", fr["tau"])
+                    evals.feed("franka_tau_ext", fr["tau_ext"]), evals.feed("franka_wrench", fr["wrench"])
+                    evals.feed("robot_mode", [int(msg.robot_mode)])
 
             def pose7(msg):
                 p, o = msg.pose.position, msg.pose.orientation
@@ -592,22 +604,28 @@ class RosMonitor:
                 def cb(msg):
                     mark(name)
                     self.tele[name] = [round(float(v), digits) for v in msg.data]
+                    evals.feed(name, self.tele[name])
                 return cb
 
             def on_cmd(msg):
                 self._cmd_times.append(time.time())
                 mark("arm_cmd")
                 self.tele["arm_cmd"] = pose7(msg)
+                evals.feed("arm_cmd", self.tele["arm_cmd"])
 
             def on_hand_cmd(msg):
                 self._hand_times.append(time.time())
                 mark("hand_cmd")
                 self.tele["hand_cmd"] = [round(float(v), 4) for v in msg.data]
+                evals.feed("hand_cmd", self.tele["hand_cmd"])
 
             def on_image(cam):
                 def cb(msg):
                     mark(cam)
                     self.frames[cam] = (time.time(), msg)
+                    evals.feed_frame(cam, msg)
+                    if cam == live.cam:
+                        live.feed(msg)
                 return cb
 
             def on_glove(msg):
@@ -649,6 +667,7 @@ class RosMonitor:
                 self.arm_stamp = time.time()
                 mark("arm_pose")
                 self.tele["arm"] = pose7(msg)
+                evals.feed("arm", self.tele["arm"])
 
             node.create_subscription(PoseStamped, f"/{SIDE}/arm/end_effector_pose", on_arm, 5)
             node.create_subscription(Float32MultiArray, f"/{SIDE}/hand/policy_output", on_hand_cmd, 50)
@@ -659,6 +678,7 @@ class RosMonitor:
             def on_policy_arm(msg):   # what the policy outputs; in preview it goes nowhere else
                 mark("policy_arm")
                 self.tele["policy_arm"] = pose7(msg)
+                evals.feed("policy_arm", self.tele["policy_arm"])
 
             node.create_subscription(PoseStamped, "/policy_inference/actions_arm", on_policy_arm, 10)
             node.create_subscription(Float32MultiArray, "/policy_inference/actions_hand", floats("policy_hand", 4), 10)
@@ -666,6 +686,7 @@ class RosMonitor:
             def on_policy_timing(msg):   # one per policy step, from the inference node
                 if len(msg.data) >= 5:
                     self.timing = (self.timing + [(time.time(), *[float(v) for v in msg.data[:5]])])[-3000:]
+                    evals.feed("policy_timing", [float(v) for v in msg.data[:5]])
 
             node.create_subscription(Float32MultiArray, "/policy_inference/timing", on_policy_timing, 50)
             self._String = String
@@ -721,8 +742,8 @@ class RosMonitor:
             "franka": get("franka", "arm_state"),
         }
 
-    def jpeg(self, cam, width=960):
-        """Latest frame of a camera as JPEG bytes, or None if there is no recent frame."""
+    def jpeg(self, cam, width=960, draw=None):
+        """Latest frame of a camera as JPEG bytes, or None if there is no recent frame. draw(image) may paint onto it."""
         import cv2
         import numpy as np
 
@@ -737,6 +758,9 @@ class RosMonitor:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         if img.shape[1] > width:
             img = cv2.resize(img, (width, int(round(img.shape[0] * width / img.shape[1]))), interpolation=cv2.INTER_AREA)
+        if draw is not None:
+            img = img.copy()   # the message's own pixels must stay as they are
+            draw(img)
         img = rotate_for_display(cam, img)  # display only: the recorded data is not turned
         ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
         return buf.tobytes() if ok else None
@@ -1305,6 +1329,7 @@ monitor = None
 
 def cleanup():
     """Ctrl-C everything this page started and give it time to exit cleanly."""
+    live.stop()
     for p in (teleop, recording, inference, job):
         p.stop(grace=10)
     if nuc.state in ("launching", "running"):
@@ -1326,6 +1351,7 @@ async def lifespan(app):
     monitor = RosMonitor()
     threading.Thread(target=operate.supervise, daemon=True).start()
     threading.Thread(target=policy_watch, daemon=True).start()
+    threading.Thread(target=eval_watch, daemon=True).start()
     yield
 
 
@@ -1354,7 +1380,8 @@ def status():
         "disk_free_gb": round(usage.free / 1e9, 1),
         "datasets_dir": str(RAW),
         "hf_repo": station.hf_repo(),
-        "features": ["lighting", "meta", "description", "orientation", "inference", "timing"],
+        "features": ["lighting", "meta", "description", "orientation", "inference", "timing", "eval"],
+        "eval": {**evals.info(), "live": live.info()},
         "time": time.time(),
     }
 
@@ -1412,12 +1439,15 @@ def _relax_after_policy():
 
 
 def policy_command(action, override=False):
-    """Start, stop or reset the loaded policy, or move the arm to the center pose."""
+    """Start, stop or reset the loaded policy, or move the arm to the center pose.
+    Every live start is recorded as an evaluation run (card 5) until the policy stops."""
     if action not in ("start", "stop", "reset", "init_arm"):
         raise ControlError("Unknown policy command.")
     if not inference.running:
         raise ControlError("Start the policy launch first.")
     if action == "stop":   # always allowed; it also ends a move to the center pose
+        if evals.state == "running" and not evals.current["end_reason"]:
+            evals.current["end_reason"] = "operator"   # the evaluation of this run ends with it
         monitor.policy_command("stop")
         if not inference.preview:
             threading.Thread(target=_relax_after_policy, daemon=True).start()
@@ -1466,7 +1496,16 @@ def policy_command(action, override=False):
             raise ControlError("Not started, because a check failed: " + "; ".join(failed) + ". Fix it, or confirm in the page that you want to run anyway.")
         operate.relax_after_start = False
         note = operate._torque(True)   # the fingers need power to follow the policy
-    monitor.policy_command("start")
+    if not inference.preview:   # a preview moves nothing, so there is nothing to evaluate
+        try:   # recording begins before the policy does, so the first moment is in it; it never keeps the policy from starting
+            evals.begin(_eval_meta(_failed(result)))
+        except Exception as exc:
+            note = (note + " " if note else "") + f"This run is not being evaluated: {exc}"
+    try:
+        monitor.policy_command("start")
+    except Exception:
+        evals.cancel()
+        raise
     return note
 
 
@@ -1567,6 +1606,115 @@ async def inference_cmd(action: str, request: Request):
     return {"note": note or "", "inference": inference.info()}
 
 
+# -- evaluation of policy runs -----------------------------------------------------------
+def _git_commit():
+    try:
+        out = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=3).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(HERE), "status", "--porcelain", "-uno"], capture_output=True, text=True, timeout=3).stdout.strip()
+        return out + (" + uncommitted changes" if out and dirty else "")
+    except Exception:
+        return ""
+
+
+def _eval_meta(failed=()):
+    """What is stored with an evaluated run besides the recording: the policy and the station."""
+    info = next((r for r in policies.list_runs() if r["name"] == inference.run), {})
+    return {
+        "run": inference.run, "ckpt": inference.ckpt, "algo": info.get("algo", ""), "dataset": info.get("dataset", ""),
+        "note": "", "failed_checks": list(failed), "rwr_system_commit": _git_commit(),
+        "station": {"end_effector_parameters": getattr(monitor, "ee_params", None), "calibration": station.calibration(),
+                    "center_yaw_deg": operate.center_yaw(), "hand_temp_start": monitor.tele.get("hand_temp") if monitor else None},
+    }
+
+
+def eval_watch():
+    """Background loop: an evaluation follows the policy. Its clock starts when the policy starts and it is saved when the
+    policy has stopped, whatever stopped it. A policy started outside this page (ros2 topic pub) is picked up as well."""
+    seen = None   # start time of the last policy run that was picked up
+    while True:
+        time.sleep(0.1)
+        try:
+            if monitor is None:
+                continue
+            now, tr = time.time(), evals.current
+            if inference.running and not live.running:   # the live count runs with the policy launch, also before the policy starts and in preview
+                live.start()
+            elif not inference.running and live.proc is not None:
+                live.stop()
+            on = inference.running and inference.policy_on and inference.policy_since and not inference.preview
+            if evals.state == "idle":
+                if on and inference.policy_since != seen:   # not started through this page: the first moment is missing
+                    seen = inference.policy_since
+                    evals.begin(dict(_eval_meta(), started_outside_page=True))
+                    evals.started(inference.policy_since, inference_log=inference.log_file)
+                    live.reset(inference.policy_since)
+            elif evals.state == "starting":
+                if on and inference.policy_since >= tr["asked"] - 0.5:
+                    seen = inference.policy_since
+                    evals.started(inference.policy_since, inference_log=inference.log_file)
+                    live.reset(inference.policy_since)
+                elif now - tr["asked"] > 6.0:
+                    evals.cancel("The run was not recorded: the inference node did not start the policy. See the Log in card 4.")
+            elif evals.state == "running" and not on:
+                robot = monitor.info()["robot"]
+                reason = "launch_stopped" if not inference.running else "robot" if inference.note else "stopped"
+                evals.finish(reason, {
+                    "robot_mode_at_end": robot["mode"] if robot else None, "stop_note": inference.note,
+                    "timing": monitor.policy_timing(window=now - tr["t0"] + 5.0, since=tr["t0"]),
+                    "policy_pauses": inference.pauses, "policy_slow_steps": inference.slow, "policy_problems": list(inference.problems),
+                    "hand_temp_end": monitor.tele.get("hand_temp"), "live": live.result(),
+                })
+        except Exception as exc:
+            evals.message = f"Evaluation error: {type(exc).__name__}: {exc}"
+
+
+def _draw_tracking(img):
+    """Paint what the live count sees onto a workspace camera image (BGR): the floor's outline, the cube and its path."""
+    import cv2
+    import numpy as np
+
+    st = live.info()
+    if not st["fresh"] or not st["size"]:
+        return
+    k = img.shape[1] / st["size"][0]
+    scaled = lambda pts: [np.round(np.array(pts, dtype=float) * k).astype(np.int32)]
+    if st["hull"]:
+        cv2.polylines(img, scaled(st["hull"]), True, (255, 255, 255), 1, cv2.LINE_AA)
+    trail = [p for p in st["trail"] if p]
+    if len(trail) > 1:
+        cv2.polylines(img, scaled(trail), False, (255, 255, 0), 2, cv2.LINE_AA)
+    if st["cube"]:
+        x, y, area = st["cube"]
+        centre, radius = (int(round(x * k)), int(round(y * k))), int(round((area / 3.1416) ** 0.5 * k)) + 6
+        cv2.circle(img, centre, radius, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.circle(img, centre, radius, (0, 255, 0) if st["at_surface"] else (255, 255, 0), 2, cv2.LINE_AA)   # green while it is at its surface
+    text = st["problem"] or f"cube: {st['colour']}{'' if st['cube'] else ' (not seen)'}   placed: {len(st['placed'])}"
+    for colour, thick in (((0, 0, 0), 4), ((255, 255, 255), 1)):
+        cv2.putText(img, text, (10, img.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, thick, cv2.LINE_AA)
+
+
+@app.get("/api/eval")
+def eval_list():
+    trials = evals.trials()
+    return {"trials": trials[:60], "total": len(trials), "folder": str(evals.folder)}
+
+
+@app.post("/api/eval/trial/{trial_id}")
+async def eval_update(trial_id: str, request: Request):
+    try:
+        return evals.update(trial_id, await request.json())
+    except EvalError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.get("/api/eval/trial/{trial_id}/{cam}.mp4")
+def eval_video(trial_id: str, cam: str):
+    try:
+        return FileResponse(evals.video(trial_id, cam), media_type="video/mp4")
+    except EvalError as exc:
+        raise HTTPException(404, str(exc))
+
+
 @app.post("/api/teleop/start")
 async def teleop_start(request: Request):
     body = await request.json()
@@ -1662,7 +1810,7 @@ async def live_stream(request: Request):
 def camera_frame(cam: str):
     if cam not in CAMERAS or not monitor:
         raise HTTPException(404)
-    data = monitor.jpeg(cam)
+    data = monitor.jpeg(cam, draw=_draw_tracking if cam == live.cam else None)
     if data is None:
         raise HTTPException(503, "No recent frame")
     return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
@@ -1695,7 +1843,7 @@ def datasets():
 def dataset_process(dataset: str):
     if job.running:
         raise HTTPException(409, "Another processing job is still running.")
-    if inference.policy_on:
+    if inference.policy_on or evals.busy:
         raise HTTPException(409, "Stop the policy first: processing is heavy and would make the policy stall.")
     if operate.rec in ("recording", "saving"):
         raise HTTPException(409, "Wait until the current demo is recorded and saved: processing is heavy and could disturb the recording.")

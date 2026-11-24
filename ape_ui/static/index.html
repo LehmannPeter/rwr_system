@@ -356,6 +356,30 @@ input[type=range] { width: 100%; }
     <div class="scroll"><table class="t" id="pol-checks"></table></div>
     <details id="inference-details"><summary>Log</summary><div class="term small" id="term-inference"></div></details>
   </section>
+
+  <section class="card" id="ev-card">
+    <div class="row head">
+      <div class="row"><h2>5 · Evaluate policy</h2><span class="pill" id="ev-pill">Idle</span></div>
+    <div class="muted" id="ev-info"></div>
+    <div style="margin-top:12px">
+      <div class="op-state idle" id="ev-state"></div>
+      <div class="op-timer" id="ev-timer"></div>
+      <div class="muted" id="ev-sub"></div>
+      <div class="muted" id="ev-track" style="margin-top:6px"></div>
+    </div>
+    <div id="ev-notes"></div>
+    <div id="ev-review"></div>
+    <div id="ev-player" style="display:none; margin-top:12px">
+      <div class="row" style="justify-content:space-between"><p class="sub-h" id="ev-pl-title" style="margin:0"></p><button id="ev-pl-close">Close</button></div>
+      <div class="row" style="margin-top:8px; align-items:flex-start; flex-wrap:nowrap">
+        <video id="ev-v-front" controls muted preload="metadata" style="flex:2; min-width:0; border-radius:8px; background:var(--term)"></video>
+        <video id="ev-v-wrist" muted preload="metadata" style="flex:1; min-width:0; border-radius:8px; background:var(--term)"></video>
+      </div>
+      <div class="muted" style="margin-top:4px">Workspace camera left, wrist camera right (as recorded, not turned). Video time is run time. The + button above adds a placement at the time the video shows.</div>
+    </div>
+    <p class="sub-h" style="margin:16px 0 4px" id="ev-trials-s">Evaluated runs</p>
+    <div class="scroll"><table class="t" id="ev-trials"></table></div>
+  </section>
   </div>
   <div class="col">
   <section class="card">
@@ -960,6 +984,107 @@ function renderPolicy(s) {
 }
 setInterval(() => { if (!document.hidden && polHave) loadPolicies().then(loadChecks); }, 4000);
 
+/* ---------- evaluation of policy runs ---------- */
+let EV = null, EVL = {trials: [], total: 0}, evHave = false, evBusy = false, evSel = null, evLast = null, evShown = {};
+async function loadEval() {
+  if (!evHave) return;
+  try { const r = await fetch('/api/eval', {cache: 'no-store'}); if (r.ok) { EVL = await r.json(); renderEvalLists(); } } catch (e) {}
+}
+const evShort = t => esc((t.run || '').replace(/^(\d{8}-\d{6})_.*/, '$1')) + ' · ' + esc((t.ckpt || '').replace(/^checkpoints\//, '').replace(/\.pth$/, ''));
+const evEnd = t => esc((EV && EV.end_reasons[t.end_reason]) || t.end_reason || '');
+const evCounting = t => !t.live && !!(t.detection && t.detection.state === 'running');   // no live count: wait for the count from the video
+const evDiffer = t => !!(t.live && t.detection && t.detection.state === 'done' && !t.detection.problem && t.detection.placed.length !== t.live.placed.length);
+function setHtml(id, html) { if (evShown[id] !== html) { evShown[id] = html; $(id).innerHTML = html; } }
+function renderEvalLists() {
+  $('ev-trials-s').textContent = `Evaluated runs (${EVL.total})` + (EVL.total > EVL.trials.length ? `, the newest ${EVL.trials.length} shown` : '');
+  setHtml('ev-trials', !EVL.trials.length ? '<tr><td class="muted">No run has been evaluated yet.</td></tr>'
+    : '<tr><th>Started</th><th>Policy</th><th class="r">Time</th><th class="r" title="Counted live from the workspace camera; corrections made in Open are included.">Cubes placed</th><th class="r" title="Cubes placed in the first 3:00 of the run, the time the course counts. Only for runs of 3:00 or longer.">In first 3:00</th><th class="r" title="Run time divided by cubes placed.">Seconds per cube</th><th>Ended</th><th></th></tr>'
+    + EVL.trials.map(t => { const r = t.result || {}; return `<tr class="${t.id === evSel ? 'sel' : ''}"><td>${esc(t.started || t.id)}</td><td title="${esc(t.run)} / ${esc(t.ckpt)}">${evShort(t)}</td><td class="r">${mmss(t.duration_s)}</td><td class="r">${evCounting(t) ? '<span class="muted">counting…</span>' : '<b>' + (r.placed ?? '') + '</b>' + (evDiffer(t) ? ' <span class="tag-warn" title="The recount from the saved video gave another number: open the run">*</span>' : '')}</td><td class="r">${t.duration_s >= EV.graded_seconds && !evCounting(t) ? r.placed_180 : '–'}</td><td class="r">${r.seconds_per_cube ?? '–'}</td><td>${evEnd(t)}</td><td><button data-open="${esc(t.id)}">Open</button></td></tr>`; }).join(''));
+  renderReview();
+}
+$('ev-trials').addEventListener('click', e => { const b = e.target.closest('button[data-open]'); if (b) { evSel = b.dataset.open; evShown['ev-trials'] = ''; renderEvalLists(); $('ev-review').scrollIntoView({block: 'nearest'}); } });
+function renderReview() {
+  const t = EVL.trials.find(x => x.id === evSel), box = $('ev-review');
+  if (!t) { setHtml('ev-review', ''); return; }
+  if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;   // do not rebuild while a note is being typed
+  const r = t.result || {}, a = t.auto || {}, tm = t.timing || {}, playing = $('ev-player').dataset.id === t.id;
+  let h = `<div class="check" style="margin-top:12px"><div class="row" style="justify-content:space-between"><div><div class="k">Run ${esc(t.id)} · ${evShort(t)}</div>`
+    + `<div class="v">${evCounting(t) ? 'Counting the placed cubes from the video…' : `${r.placed} cube${r.placed === 1 ? '' : 's'} placed`} in ${mmss(t.duration_s)}${t.duration_s >= EV.graded_seconds ? `, ${r.placed_180} in the first ${mmss(EV.graded_seconds)}` : ''} · ${evEnd(t)}</div></div>`
+    + `<div class="row"><button data-act="video">${playing ? 'Close videos' : 'Watch the videos'}</button><button data-act="close">Close</button></div></div>`;
+  h += `<div class="row" style="margin-top:8px; gap:4px"><span>Cubes placed: <b class="num">${r.placed}</b></span><button data-act="remove" data-k="placed" style="padding:2px 9px" title="Remove the last placement"${r.placed ? '' : ' disabled'}>−</button><button data-act="add" data-k="placed" style="padding:2px 9px" title="Add a placement${playing ? ' at the time the video shows' : ' (without a time; open the videos to add it at a time)'}">+</button></div>`;
+  const marks = (t.events || []).map(e => (e.t == null ? 'no time' : mmss(e.t)) + (e.source === 'operator' ? ' (added by hand)' : ''));
+  if (marks.length) h += `<div class="muted" style="margin-top:6px">Cube placed at: ${marks.join(' · ')}</div>`;
+  const det = t.detection || {};
+  if (t.live) h += `<div class="muted" style="margin-top:4px" title="Counted by eval_detect.py from the workspace camera while the policy ran. Checked on the red-cube demos only.">Counted live: ${t.live.placed.length} (cube colour seen: ${esc(t.live.colour || 'unknown')})${t.live.problem ? ' · ' + esc(t.live.problem) : ''}.</div>`;
+  if (det.state === 'running') h += '<div class="muted" style="margin-top:4px">Counting again from the saved video…</div>';
+  else if (det.state === 'done' && det.problem) h += `<div class="note warn">The cubes could not be counted from the saved video: ${esc(det.problem)}.</div>`;
+  else if (det.state === 'done' && evDiffer(t)) h += `<div class="note warn">Counted again from the saved video: <b>${det.placed.length}</b>, not ${t.live.placed.length} (at ${det.placed.map(mmss).join(' · ') || 'no time'}). Watch the videos to see which is right; − and + correct the count.</div>`;
+  else if (det.state === 'done') h += `<div class="muted" style="margin-top:4px">Counted again from the saved video: ${det.placed.length}${t.live ? ', the same' : ' (there was no live count)'}. − and + correct the count.</div>`;
+  const auto = [];
+  if (a.still_s != null) auto.push(`arm and hand motionless for ${a.still_s} s in ${a.still.length} interval${a.still.length === 1 ? '' : 's'} of ${5} s or more${a.still.length ? ' (at ' + a.still.map(x => mmss(x.t)).join(', ') + ')' : ''}`);
+  if (a.hand_closings != null) auto.push(`hand closed ${a.hand_closings} time${a.hand_closings === 1 ? '' : 's'}`);
+  if (a.arm_path_m != null) auto.push(`arm path ${a.arm_path_m} m`);
+  if (tm.predict_ms != null) auto.push(`prediction time ${tm.predict_ms} ms, ${tm.dropped_total} skipped step${tm.dropped_total === 1 ? '' : 's'}`);
+  if (auto.length) h += `<div class="muted" style="margin-top:4px" title="Read from the arm and hand signals by a fixed rule. Not yet compared with what an observer saw.">Measured automatically: ${auto.join(' · ')}.</div>`;
+  if ((t.recording_problems || []).length) h += `<div class="note warn">The recording is incomplete: ${esc(t.recording_problems.join('; '))}.</div>`;
+  if ((t.failed_checks || []).length) h += `<div class="note warn">Run although a check failed: ${esc(t.failed_checks.join('; '))}.</div>`;
+  if (t.stop_note) h += `<div class="note warn">${esc(t.stop_note)}</div>`;
+  if (t.started_outside_page) h += '<div class="note warn">This policy run was not started with this page, so its first moment is missing.</div>';
+  h += `<div class="row" style="margin-top:8px"><label style="flex:1">Note <input type="text" id="ev-r-note" value="${esc(t.note || '')}" maxlength="500" style="flex:1; width:auto" spellcheck="false"></label><button data-act="note">Save note</button></div>`;
+  h += `<div class="muted" style="margin-top:4px; font-size:13px">Saved in <code>${esc(EVL.folder)}/${esc(t.id)}/</code>${t.inference_log ? ` · inference node log: <code>${esc(t.inference_log)}</code>` : ''}</div></div>`;
+  setHtml('ev-review', h);
+}
+function evPlayer(id) {
+  const box = $('ev-player'), f = $('ev-v-front'), w = $('ev-v-wrist');
+  if (!id) { f.pause(); w.pause(); f.removeAttribute('src'); w.removeAttribute('src'); box.style.display = 'none'; box.dataset.id = ''; return; }
+  box.dataset.id = id; box.style.display = ''; $('ev-pl-title').textContent = 'Run ' + id;
+  f.src = `/api/eval/trial/${id}/oakd_front_view.mp4`; w.src = `/api/eval/trial/${id}/oakd_wrist_view.mp4`;
+}
+{ const f = $('ev-v-front'), w = $('ev-v-wrist');   // the wrist video follows the workspace video
+  f.onplay = () => { w.currentTime = f.currentTime; w.play().catch(() => {}); }; f.onpause = () => w.pause();
+  f.onseeked = () => { w.currentTime = f.currentTime; }; f.onratechange = () => { w.playbackRate = f.playbackRate; }; }
+$('ev-pl-close').onclick = () => { evPlayer(null); evShown['ev-review'] = ''; renderReview(); };
+$('ev-review').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-act]'), t = EVL.trials.find(x => x.id === evSel); if (!b || !t) return;
+  const act = b.dataset.act, url = '/api/eval/trial/' + t.id, playing = $('ev-player').dataset.id === t.id;
+  if (act === 'close') { evSel = null; evPlayer(null); }
+  else if (act === 'video') evPlayer(playing ? null : t.id);
+  else if (act === 'note') await post(url, {note: $('ev-r-note').value});
+  else if (act === 'add') await post(url, {add: b.dataset.k, t: playing ? Math.round($('ev-v-front').currentTime * 10) / 10 : null});
+  else if (act === 'remove') await post(url, {remove: b.dataset.k});
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  evShown['ev-review'] = ''; evShown['ev-trials'] = ''; await loadEval();
+});
+function renderEval(s) {
+  const was = evHave; evHave = (s.features || []).includes('eval'); EV = evHave ? s.eval : null;
+  if (!evHave) { pill($('ev-pill'), 'Not available', ''); $('ev-notes').innerHTML = '<div class="note warn">Restart APE to use this card: the running server was started before the card was added.</div>'; return; }
+  if (!was) loadEval();
+  const p = s.procs.inference, c = EV.current, lv = EV.live || {};
+  $('ev-track').innerHTML = !p.running ? '' : !lv.fresh ? 'Cube tracking: starting…'
+    : 'Cube tracking: ' + (lv.problem ? `<span class="tag-warn">${esc(lv.problem)}</span>` : `${esc(lv.colour)} cube ${lv.cube ? 'seen' : 'not seen right now'}${lv.at_surface ? ', at its surface' : ''}`)
+      + (EV.state === 'running' ? '.' : `. Placements counted since the launch started: ${lv.placed.length} (try it: put the cube on its surface by hand).`) + ' The Live view shows the floor outline, the cube and its path.';
+  $('ev-info').innerHTML = `Every policy run is evaluated by itself: from <b>Start policy</b> to <b>Stop policy</b> in card 4. Evaluated are live runs only, not previews. The cubes placed on the surface of their colour are counted from the workspace camera while the policy runs; the Live view shows what the count sees. Both camera views and the arm and hand signals are saved in <code>${esc(EV.folder)}</code>.`;
+  let state = 'No policy running', cls = 'idle', sub = '', timer = '', pl = ['Idle', ''];
+  if (EV.state === 'running') {
+    state = 'Evaluating'; cls = 'rec'; pl = ['Evaluating', 'bad busy'];
+    timer = mmss(c.elapsed) + (lv.fresh ? ` · ${lv.placed.length} placed` : '');
+    sub = `${evShort(c)} · until the policy is stopped in card 4.`;
+  } else if (EV.state === 'starting') { state = 'Starting the policy…'; cls = 'warn'; pl = ['Starting…', 'warn busy']; }
+  else if (EV.state === 'saving') { state = 'Saving the run…'; cls = 'warn'; sub = 'Finishing the videos and writing the signals.'; pl = ['Saving…', 'warn busy']; }
+  else if (!p.running) sub = 'Start the policy launch live in card 4, then press Start policy there.';
+  else if (!p.node_ready) sub = 'The policy is still loading.';
+  else if (p.preview) sub = 'The policy launch runs in preview: nothing moves, so the run is not evaluated.';
+  else { sub = `Loaded: ${evShort(p)}. The evaluation starts with Start policy in card 4.`; pl = ['Ready', 'ok']; }
+  pill($('ev-pill'), pl[0], pl[1]);
+  $('ev-state').textContent = state; $('ev-state').className = 'op-state ' + cls; $('ev-timer').textContent = timer; $('ev-sub').innerHTML = sub;
+  let notes = '';
+  if (EV.message) notes += `<div class="note warn">${esc(EV.message)}</div>`;
+  $('ev-notes').innerHTML = notes;
+  if (EV.last_id && EV.last_id !== evLast) { const first = evLast === null && !renderEval.sawBusy; evLast = EV.last_id; if (!first) evSel = EV.last_id; loadEval(); }
+  if (EV.state !== 'idle') renderEval.sawBusy = true;
+}
+setInterval(() => { if (!document.hidden && evHave) loadEval(); }, 5000);
+
 /* ---------- status ---------- */
 const NUC = {
   disconnected: ['Disconnected', '', 'Before starting: in Franka Desk the brakes are unlocked, FCI is active and no error is shown.'],
@@ -1023,6 +1148,7 @@ function renderExtras(s) {
 function render(s) {
   $('offline').style.display = 'none';
   renderOperate(s); renderExtras(s);
+  try { renderEval(s); delete document.body.dataset.evalError; } catch (e) { console.error('test card', e); document.body.dataset.evalError = String(e && e.stack || e).slice(0, 300); }
   try { renderPolicy(s); delete document.body.dataset.policyError; } catch (e) { console.error('policy card', e); document.body.dataset.policyError = String(e && e.stack || e).slice(0, 300); }   // a fault here must not stop the rest of the page
   /* NUC */
   const n = s.procs.nuc, [nt, nc, nh] = NUC[n.state] || NUC.disconnected;

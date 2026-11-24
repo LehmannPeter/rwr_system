@@ -131,6 +131,58 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
    - Each policy start is logged by the inference node to `~/rwr_humble_ws/inference_logs/`,
      with both images in every step (about 1.4 GB per minute, estimated from the node's code).
 
+8. **Evaluate policy** (card 5): every live policy run is recorded and its placed cubes are
+   counted, to compare checkpoints by numbers. The card does not start or stop anything and has
+   no settings or buttons to press during a run.
+   - A run is evaluated from *Start policy* to *Stop policy* in card 4 (or until the robot
+     leaves Ready, or the policy launch stops). There is no time limit. Preview runs are not
+     evaluated.
+   - The cubes placed on the surface of their own colour are counted **live** from the workspace
+     camera (`eval_detect.py --live`, a helper process at low priority that gets 10 frames per
+     second). Card 5 shows the count next to the run's time. The helper runs whenever a policy
+     launch runs, also in preview and before the policy is started, so the tracking can be tried
+     by hand: put the cube on its surface and watch the count.
+   - **Live view:** while the helper runs, the workspace image shows what it sees: the floor's
+     outline (white), a ring on the cube (green while it is at its surface), the cube's path of
+     the last 2.5 s, and the count. If the outline does not sit on the floor or the ring is not
+     on the cube, the count cannot be right.
+   - When the run has ended, the saved workspace video is counted once more (about 15 s for a
+     3 minute run; the next run can be started meanwhile). The live count stays the result; if
+     the recount gives another number, the run is marked with * and *Open* shows both.
+   - Saved per run in `data/eval/<date-time>/`: `trial.json` (policy, placements found, result),
+     `oakd_front_view.mp4` and `oakd_wrist_view.mp4` (10 frames per second, video time = run
+     time), and `signals.h5` with every stream APE receives: measured arm pose, arm commands, the
+     policy's arm and hand outputs, measured hand joints, hand commands, hand motor currents and
+     temperatures, Franka joint angles, velocities, torques and external force, robot mode, and
+     the policy's step timing. `data/eval/trials.csv` has one row per run.
+   - *Evaluated runs* lists each run with its time, cubes placed, cubes placed in the first 3:00
+     (what the course counts; for runs of 3:00 or more) and the seconds per cube.
+   - *Open* shows one run: the times of the placements counted, the two videos to check them, −
+     and + to correct the count (a + pressed while the videos are open adds a placement at the
+     video's time), and a note.
+   - **How the count works and how far it is checked.** The detector follows the cube on the
+     wooden floor, where it stands out, and counts a placement when the cube reaches the surface
+     of its colour and is then back on the floor, sliding away or lying somewhere else than
+     before. The rule and its thresholds are in `eval_detect.py`. It was built on the red-cube
+     demos of 2026-11-21 and its thresholds were set on them: it finds exactly one placement in
+     each of the 66 single-relocation demos (arena poses a0, a1, a2) and 20 to 32 in the five
+     3 minute demos, whose true numbers are not known. One of those gave 31 instead of 32 once
+     its images had gone through the video compression used here. Counted the way the live
+     helper does (the arena is taken from the last 30 s only), the demos give the same numbers
+     and times, except one 3 minute demo: 19 instead of 20. In that demo the robot pushed the
+     arena about 3 cm aside during the run. Not known: how often a failed attempt of a policy
+     is counted by mistake (the demos hold almost no failures), blue and yellow cubes,
+     daylight. A cube put on another surface is simply not counted.
+   - *Measured automatically* (arm and hand motionless for 5 s or more, number of hand closings,
+     arm path) is read from the signals by fixed rules in `eval_trials.py`, for information.
+   - A live policy started outside the page (`ros2 topic pub`) is recorded as well, without its
+     first moment.
+   - Disk: a run's own files are small (videos and signals), but the inference node still
+     writes its log, about 1.4 GB per minute.
+   - Offline test without ROS: `tests/test_eval.py` (needs `fastapi` and `uvicorn`; with
+     `APE_TEST_DEMO` it plays a recorded demo through the recorder and the live count).
+     Try the detector on a file: `python eval_detect.py <oakd_front_view.mp4 or processed demo .h5>`.
+
 The top card shows the robot state in words, with the recovery steps when the arm is in
 reflex or user-stopped.
 
