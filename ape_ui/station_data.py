@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,36 @@ def rotate_for_display(cam, img):
 
     code = {"ccw": cv2.ROTATE_90_COUNTERCLOCKWISE, "cw": cv2.ROTATE_90_CLOCKWISE, "180": cv2.ROTATE_180}.get(DISPLAY_ROTATION.get(cam))
     return img if code is None else cv2.rotate(img, code)
+
+
+HERE = Path(__file__).resolve().parent
+STATION_FILE = HERE / "static" / "local" / "station.json"   # git-ignored, station-specific (also holds robot_ip)
+ARCHIVE_JOB = HERE / "archive_job.py"
+
+
+def archive_settings():
+    """Where and how demos are copied to the Training machine. Set in static/local/station.json, e.g.
+    {"archive_host": "<ssh alias>", "archive_data_root": "~/rwr_task2/data",
+     "archive_remote_rsync": "~/.local/rsync/rsync", "archive_transfer_processed": true,
+     "archive_require_hf_backup": true}
+    or with $APE_ARCHIVE_HOST, $APE_ARCHIVE_DATA_ROOT, $APE_REMOTE_RSYNC, $APE_ARCHIVE_TRANSFER_PROCESSED,
+    $APE_ARCHIVE_REQUIRE_HF_BACKUP (0/1), $APE_ARCHIVE_SSH (remote shell, rarely needed)."""
+    try:
+        cfg = json.loads(STATION_FILE.read_text())
+    except Exception:
+        cfg = {}
+    pick = lambda env, key, default="": str(os.environ.get(env) or cfg.get(key) or default).strip()
+
+    def flag(env, key, default=True):
+        value = os.environ.get(env, cfg.get(key, default))
+        return value if isinstance(value, bool) else str(value).strip().lower() not in ("0", "false", "no", "off", "")
+
+    return {"host": pick("APE_ARCHIVE_HOST", "archive_host"),
+            "data_root": pick("APE_ARCHIVE_DATA_ROOT", "archive_data_root", "~/rwr_task2/data"),
+            "remote_rsync": pick("APE_REMOTE_RSYNC", "archive_remote_rsync"),
+            "ssh": pick("APE_ARCHIVE_SSH", "archive_ssh"),
+            "transfer_processed": flag("APE_ARCHIVE_TRANSFER_PROCESSED", "archive_transfer_processed"),
+            "require_hf_backup": flag("APE_ARCHIVE_REQUIRE_HF_BACKUP", "archive_require_hf_backup")}
 
 
 class DataError(Exception):
@@ -64,6 +95,7 @@ class Station:
         self.processed = data / "processed"
         self.tool = data_tool()
         self.previews = workspace / "work" / "ape_previews"
+        self.archive_status = workspace / "work" / "archive_status"   # one JSON per demo, written by archive_job.py
         self.hand_cfg_dir = workspace / "install/hand_control/share/hand_control/orca/configs/orcahand_v2/right"
         self.calib_backups = workspace / "hand_calibration_backups"
         self.logger_cfg = workspace / "src/rwr_system/experiments/cfgs/logger/datacollection_right.yaml"
@@ -189,6 +221,54 @@ class Station:
         except Exception as exc:
             return f"The settings file of this demo was not written: {exc}"
 
+    def _archive_job_args(self, action, dataset):
+        a = archive_settings()
+        cmd = [sys.executable, "-u", str(ARCHIVE_JOB), action, "--data", str(self.data), "--session", safe(dataset),
+               "--status-dir", str(self.archive_status), "--dest-root", a["data_root"]]
+        if a["host"]:
+            cmd += ["--host", a["host"]]
+        if a["remote_rsync"]:
+            cmd += ["--rsync-path", a["remote_rsync"]]
+        if a["ssh"]:
+            cmd += ["--ssh", a["ssh"]]
+        if not a["transfer_processed"]:
+            cmd.append("--no-processed")
+        if action == "clear" and not a["require_hf_backup"]:
+            cmd.append("--no-require-hf-backup")
+        return cmd
+
+    def clear_command(self, dataset):
+        """Delete the local files of demos that are verified on the Training machine (re-verified first)."""
+        if not archive_settings()["host"]:
+            raise DataError("No Training machine is set: add archive_host to static/local/station.json.")
+        return self._archive_job_args("clear", dataset)
+
+    def archive_state(self, dataset, demo):
+        """Short archive / transfer state of one demo for the demo list."""
+        try:
+            s = json.loads((self.archive_status / dataset / f"{demo}.json").read_text())
+        except Exception:
+            return None
+        a, v, c, hf = s.get("archive") or {}, s.get("verified") or {}, s.get("cleared"), s.get("hf") or {}
+        if c:
+            state, text = "cleared", f"on the Training machine, cleared here {c.get('at', '')}"
+        elif v.get("ok"):
+            state, text = "verified", f"copied and verified {v.get('at', '')}"
+        elif v:
+            state, text = "not_verified", "; ".join(v.get("problems") or []) or "not verified"
+        elif a and not a.get("ok", True):
+            state, text = "archive_failed", "; ".join(a.get("errors") or []) or "archiving failed"
+        elif a:
+            state, text = "archived", "archived, not copied yet"
+        else:
+            return None
+        if v.get("ok") and not c:
+            text += " · " + (hf.get("text") or "Hugging Face not checked yet")
+        if a.get("ok") and a.get("psnr_mean"):
+            text += " · PSNR " + ", ".join(f"{k.replace('oakd_', '').replace('_view', '')} {v:.1f} dB" for k, v in a["psnr_mean"].items())
+        return {"state": state, "text": text, "hf": bool(hf.get("ok")),
+                "archive_mb": round((a.get("bytes") or 0) / 1e6, 1) if a.get("bytes") else None}
+
     def upload_command(self):
         return [sys.executable, "-u", str(self.tool), "--data", str(self.data), "push"]
 
@@ -209,11 +289,13 @@ class Station:
             raw_dir, proc_dir = self.raw / name, self.processed / (name + PROCESSED_SUFFIX)
             raw = {f.stem: f for f in raw_dir.glob("*.h5")} if raw_dir.is_dir() else {}
             proc = {f.stem: f for f in proc_dir.glob("*.h5")} if proc_dir.is_dir() else {}
+            status_dir = self.archive_status / name
+            cleared = {f.stem for f in status_dir.glob("*.json")} - set(raw) - set(proc) if status_dir.is_dir() else set()
             # Name in dataset versions, as rwr_data.py builds it: <session prefix>_<colour>_<position in the session>
-            listed = sorted({stem for (ses, stem) in manifest if ses == name} | set(raw) | set(proc))
+            listed = sorted({stem for (ses, stem) in manifest if ses == name} | set(raw) | set(proc) | cleared)
             number = {stem: i for i, stem in enumerate(listed, start=1)}
             demos = []
-            for stem in sorted(set(raw) | set(proc)):
+            for stem in sorted(set(raw) | set(proc) | cleared):
                 row = manifest.get((name, stem), {})
                 demos.append({
                     "dataset_name": f"{prefix_of(name)}_{row.get('colour') or 'nocolour'}_{number[stem]:04d}.h5",
@@ -224,6 +306,7 @@ class Station:
                     "check": self._summary(name, stem) if stem in proc else None,
                     "colour": manifest.get((name, stem), {}).get("colour", ""),
                     "keep": manifest.get((name, stem), {}).get("keep", ""),
+                    "archive": self.archive_state(name, stem),
                 })
             out.append({
                 "name": name,
@@ -231,6 +314,11 @@ class Station:
                 "total_gb": round(sum((d["raw_gb"] or 0) + (d["processed_gb"] or 0) for d in demos), 1),
                 "todo": sum(1 for d in demos if d["raw_gb"] is not None and (d["processed_gb"] is None or d["check"] is None)),
                 "processed_dir": str(proc_dir),
+                # verified on the Training machine; the clear job checks the Hugging Face backup again itself
+                "clearable": sum(1 for d in demos if d["archive"] and d["archive"]["state"] == "verified"),
+                "clearable_hf": sum(1 for d in demos if d["archive"] and d["archive"]["state"] == "verified" and d["archive"]["hf"]),
+                "clearable_gb": round(sum((d["raw_gb"] or 0) + (d["processed_gb"] or 0) for d in demos
+                                          if d["archive"] and d["archive"]["state"] == "verified"), 1),
                 "next_number": len(listed) + 1,
             })
         return out
@@ -253,7 +341,10 @@ class Station:
             f'python "{self.inspect_script}" "$f" --output "{prev}/$n" > "{prev}/$n.log" 2>&1 '
             f'&& echo "   ok" || echo "   PROBLEMS FOUND (see the demo list)"; fi\n'
             f'done\n'
-            f'echo "== Done =="; exit $sync_status\n'
+            f'echo "== Archiving and copying to the Training machine =="\n'
+            f'{shlex.join(self._archive_job_args("transfer", dataset))}\n'
+            f'archive_status=$?\n'
+            f'echo "== Done =="; [ $sync_status -ne 0 ] && exit $sync_status; exit $archive_status\n'
         ), prev
 
     # -- player ------------------------------------------------------------------

@@ -36,7 +36,7 @@ sys_path_added = str(HERE)
 import sys
 if sys_path_added not in sys.path:
     sys.path.insert(0, sys_path_added)
-from station_data import CAMERAS, DataError, Station, rotate_for_display, safe
+from station_data import CAMERAS, DataError, Station, archive_settings, rotate_for_display, safe
 from policy_checks import Policies, PolicyError
 WORKSPACE = Path(os.environ.get("RWR_WS", Path.home() / "rwr_humble_ws"))
 DATA = WORKSPACE / "data"  # raw/<session>/, processed/<session>_10hz/, datasets/<version>/, manifest.csv
@@ -1651,7 +1651,8 @@ def hand_recalibrate():
 
 @app.get("/api/datasets")
 def datasets():
-    return {"datasets": station.list_datasets(), "job_running": job.running, "job_dataset": job.dataset}
+    return {"datasets": station.list_datasets(), "job_running": job.running, "job_dataset": job.dataset,
+            "archive_host_set": bool(archive_settings()["host"]), "archive_require_hf": archive_settings()["require_hf_backup"]}
 
 
 @app.post("/api/datasets/{dataset}/process")
@@ -1669,6 +1670,25 @@ def dataset_process(dataset: str):
     prev.mkdir(parents=True, exist_ok=True)
     job.dataset = dataset
     job.start(["bash", "-c", script], cwd=WORKSPACE, env=ROS_ENV)
+    return job.info()
+
+
+@app.post("/api/datasets/{dataset}/clear")
+def dataset_clear(dataset: str):
+    """Delete the local raw, processed and archive files of the demos whose files all match on the Training
+    machine. archive_job.py compares the checksums again right before deleting."""
+    if job.running:
+        raise HTTPException(409, "Another job is still running.")
+    if inference.policy_on:
+        raise HTTPException(409, "Stop the policy first.")
+    if operate.rec in ("recording", "saving", "review"):
+        raise HTTPException(409, "Save or discard the current demo first.")
+    try:
+        cmd = station.clear_command(dataset)
+    except DataError as exc:
+        raise HTTPException(400, str(exc))
+    job.dataset = "clear " + dataset
+    job.start(cmd, cwd=WORKSPACE)
     return job.info()
 
 
