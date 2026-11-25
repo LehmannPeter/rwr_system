@@ -71,6 +71,8 @@ Checklist `ape_ui/TEST_VIDEO_ARCHIVE.md`, test session `s90_2026-11-25_test`. Wi
 
 Left for the Training machine: `archive/s90_2026-11-25_test/` and `processed/s90_2026-11-25_test_10hz/` there are test duplicates of s01 data; delete them and do not merge the s90 manifest rows into training.
 
+Cleared afterwards (2026-11-25 15:40, the person's decision, disk at 29 GB free): s01 (20 demos, 25.9 GB) and s02 (46 demos, 50.4 GB) with *Clear transferred demos*; it re-verified 20 of 20 and 46 of 46 on the Training machine right before deleting. Their raw, processed and archive files are now only on the Training machine (processed also on Hugging Face); `.meta.json` and manifest rows stay here. 96 GB free afterwards. s03 and s04 not cleared (s04 not processed yet: 6 demos, 87 GB).
+
 `archive_require_hf_backup` is still false: a demo cleared now exists only on the Training machine (plus Hugging Face for processed s00–s03). Set it back to true once the archive backup to Hugging Face runs there.
 
 Changed during this instruction, at the person's request (committed `e946c06` on `policy-eval`): *Process and check new demos* and *Upload to Hugging Face* may now run while a demo is recorded or saved. Jobs run at `nice 19`; ionice is not used because the NVMe has no I/O scheduler. The logger writes `<name>.h5.part` and renames it when complete. Uploads use wifi/VPN, the robot the wired link. *Clear* stays refused while recording. Live since the APE restart at about 14:30 (the logger part from the next station launch); not yet measured on a real recording.
