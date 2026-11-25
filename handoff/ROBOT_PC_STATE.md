@@ -2,7 +2,7 @@
 
 Written only by the Claude Code session on the Robot PC. Replace the placeholders the first time; afterwards keep every section current. Rules: `handoff/README.md`.
 
-Last updated: 2026-11-21
+Last updated: 2026-11-25
 
 ## Setup
 
@@ -39,6 +39,10 @@ Last updated: 2026-11-21
 - 2026-11-21: starting the Franka controller ended in a `power_limit_violation` reflex several times. The NUC launch starts `panda_mpc_controller`, which pulls the elbow posture toward the Panda ready pose at full strength as soon as it activates. An offline replay of the public `multipanda_ros2` source at the arm's joint angles shows joints 1 and 3 snapping about 0.1 rad; that this snap trips the power limit is inferred, not reproduced. Workaround: hand-guide the arm near the ready pose before starting the controller.
 - 2026-11-21: arm teleop moved sideways opposite to the glove. The directions come from the hard-coded coil orientation `X_W_bCP` in `experiments/run_teleop_rokoko.py`, not from the glove calibration. A live sample showed the operator's forward mapping to robot -x and right to robot +y, about 180 degrees off. Uncommitted: optional station file `~/.ros/teleop_coil_adjust_right.json` (`{"yaw_deg": 180}`), read by the teleop node at start and at every resume; without the file nothing changes. APE has a switch for it (*Reverse arm directions*, off by default). No offline test covers it. File not created yet, correction not tested on the robot. Demonstrations recorded with and without it differ only in how the operator steers, not in the recorded robot poses.
 - Uncommitted on 2026-11-21: `--output_folder` option in `src/logger/syncronize_data.py`, and `rwr_il/scripts/rwr_data.py` (manifest, dataset versions, Hugging Face push and pull). The Training machine needs the `rwr_il` change pushed before it can run `pull`. Hugging Face login and repo are not set up yet; `push` and `pull` were only tested against a local stand-in.
+
+- 2026-11-25: policies paused often ("Policy output paused") and APE's *Hand follows glove* switch flickered during policy runs. Cause: the inference node skipped every step whose observation age was outside 0 to 0.2 s, and the NUC stamps `qpos_arm` about 1 ms ahead of this PC's clock, so fresh arm states had ages like -0.001 s. In the ROS logs, 251 of 281 pauses were `qpos_arm` alone and 239 logged ages were negative. Fix (uncommitted, branch `policy-eval`): `experiments/model_inference_node.py` `observation_problems` now accepts ages from -0.05 s. Not yet tried on the robot. A clock sync (chrony) between this PC and the NUC would remove the cause.
+- 2026-11-25: APE's "commands flowing" and "hand following" checks needed 5 commands in 0.5 s (10 Hz), exactly the policy's rate, so they flickered during policy runs. Lowered to 3 in 0.5 s (6 Hz) in `ape_ui/server.py` (uncommitted, branch `policy-eval`). Display and guard logic only; it does not change what the policy sends.
+- 2026-11-25: the 9 finished training runs were copied from the Training machine to `~/rwr_humble_ws/policies/`, each with `best_model.pth`, the final checkpoint and its config. The folders are prefixed with the run's name from `policy_meta.json` (e.g. `Brahe_20261124-194604_s01s02s03_v1_act`) so APE's dropdown shows it; the Training machine keeps the original folder names.
 
 ## Handled instructions
 
