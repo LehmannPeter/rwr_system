@@ -61,7 +61,10 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
      custom* then returns the arm to it. The pose is
      stored in `~/.ros/teleop_start_pose_right.json`; delete the file to forget it.
    - *Center pose*: *Move to center* brings the arm to 45 cm forward, centred, 40 cm up,
-     palm down (teleop node parameter `center_position`).
+     palm down (teleop node parameter `center_position`). It also works without the station
+     launch: APE then starts the arm teleop node on its own (`ape_arm_mover`, process
+     `mover`), which publishes arm targets only during a move. APE stops it before it starts
+     a station launch, which brings its own teleop node. Only the Franka controller is needed.
    - *After stopping a recording*: Stay, Center or Custom. With Center or Custom,
      the arm moves there by itself as soon as you press *Stop recording and pause* (the
      fingers stay powered until it arrives). The choice is remembered
@@ -84,8 +87,19 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
 5. **Recorded demos:** lists every demo of a dataset with its size and check result.
    *Process and check new demos* synchronizes the demos that are not processed yet and
    runs the inspection on each; already processed demos are skipped. *View* plays a
-   processed demo (both cameras, with a slider). Processing is refused while a demo is
-   being recorded or saved.
+   processed demo (both cameras, with a slider). Since 2026-11-25 processing (and the upload
+   below) may run while you record: the job runs at the lowest CPU priority (`nice 19`), and
+   the logger saves each demo as `<name>.h5.part` and renames it when complete, so a job never
+   reads a half-written file. A demo saved while the job runs is picked up by the next *Process*.
+   Not yet measured on a real recording (stream rates and gaps with and without a job).
+   - *Process and check new demos* also archives and copies each demo to the Training machine
+     (see "Video archive and transfer" below). The column *Archive / Training machine* shows
+     per demo: not archived, archived, archive failed, not verified, verified, cleared here.
+     Hover for details (PSNR of the archive check, which file differs).
+   - *Clear transferred demos* deletes the raw, processed and archive files of the demos marked
+     *verified* (course rule: clear the Robot PC after each session). Before deleting it compares
+     every file with the Training machine again, byte for byte; a demo that does not match is
+     kept. `<demo>.meta.json`, `manifest.csv` and the check results stay.
 6. **Recalibrate hand at next start** (in *Hand details*): moves the calibration file to
    `~/rwr_humble_ws/hand_calibration_backups/`, so the hand calibrates itself when the
    next launch starts. Only possible while no launch is running. Do this only for a
@@ -103,10 +117,13 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
    - *Start live*: the policy's outputs go to the arm and the hand once *Start policy* is
      pressed. Both steps ask for confirmation.
    - *Start policy* / *Stop policy* (also the big button in the Operate card, with a timer),
-     *Reset policy state*, and in a live launch *Move to center*: the same center pose
-     as *Move to center* in the Operate card, with the same rotation correction. The teleop
-     node is not running in a policy launch, so the inference node drives the arm
-     (`init_arm`, about 2 cm per second). The correction is read when the launch starts.
+     *Reset policy state*, and *Move to center* (next to *Stop*): since 2026-11-25 the same
+     move as in the Operate card (smooth, about 10 cm/s, with settling), through the arm
+     mover, so it works with or without a policy launch. It is refused while the policy
+     drives the arm, and *Start policy* is refused while the arm moves. While moving the
+     button reads *Stop move*. (Before, the button only existed in a live launch and the
+     inference node drove the arm with `init_arm` at about 2 cm/s; that path is still in
+     the node and the page uses it only with a server from before this change.)
    - APE stops a live policy by itself when the robot leaves Ready (reflex, stop button,
      controller gone), so no targets pile up for the next controller start. Stop policy
      makes the arm hold its last target; it is not a safety stop.
@@ -122,6 +139,97 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
      is confirmed in the page; a preview is always possible.
    - Each policy start is logged by the inference node to `~/rwr_humble_ws/inference_logs/`,
      with both images in every step (about 1.4 GB per minute, estimated from the node's code).
+
+8. **Evaluate policy** (card 5): every live policy run is recorded and its placed cubes are
+   counted, to compare checkpoints by numbers. The card does not start or stop anything and has
+   no settings or buttons to press during a run.
+   - A run is evaluated from *Start policy* to *Stop policy* in card 4 (or until the robot
+     leaves Ready, or the policy launch stops). There is no time limit. Preview runs are not
+     evaluated.
+   - The cubes placed on the surface of their own colour are counted **live** from the workspace
+     camera (`eval_detect.py --live`, a helper process at low priority that gets 10 frames per
+     second). Card 5 shows the count next to the run's time. The helper runs whenever a policy
+     launch runs, also in preview and before the policy is started, so the tracking can be tried
+     by hand: put the cube on its surface and watch the count.
+   - **Live view:** while the helper runs, the workspace image shows what it sees: the floor's
+     outline (white), a ring on the cube (green while it is at its surface), the cube's path of
+     the last 2.5 s, and the count. If the outline does not sit on the floor or the ring is not
+     on the cube, the count cannot be right.
+   - When the run has ended, the saved workspace video is counted once more (about 15 s for a
+     3 minute run; the next run can be started meanwhile). The live count stays the result; if
+     the recount gives another number, the run is marked with * and *Open* shows both.
+   - Saved per run in `data/eval/<policy run>/<checkpoint>/<date-time>/`, for example
+     `data/eval/Ampere_20261121-180315_s01_v1_act/best_model/20261125-114115/` (the grouping of
+     `inference_logs/`; the checkpoint is its file name without `.pth`; the date-time is the run id
+     and unique over all policies): `trial.json` (policy, placements found, result, `folder`),
+     `oakd_front_view.mp4` and `oakd_wrist_view.mp4` (10 frames per second, video time = run
+     time), and `signals.h5` with every stream APE receives: measured arm pose, arm commands, the
+     policy's arm and hand outputs, measured hand joints, hand commands, hand motor currents and
+     temperatures, Franka joint angles, velocities, torques and external force, robot mode, and
+     the policy's step timing. `data/eval/trials.csv` has one row per run.
+     Runs saved before 2026-11-26 lay directly in `data/eval/<date-time>/`: APE moves them into
+     the grouped folders when it starts (renames only), or by hand:
+     `python eval_trials.py migrate <data>/eval`.
+   - **Upload to the Training machine** (button above the list of runs): copies every saved run
+     and `trials.csv` to `<archive_data_root>/eval/` on the Training machine, in the same folders,
+     and compares the checksums there (`eval_upload.py`; ssh and rsync settings are the ones of
+     the demo archive, `archive_host` etc. in `static/local/station.json`). Videos and
+     `signals.h5` are sent once and never overwritten there; `trial.json` and `trials.csv` are
+     replaced when they changed here (notes, corrected counts). The column *Uploaded* shows per
+     run: *yes*, *changed since* (upload again), *not verified* (a file is missing there or has
+     other content; see the log in card 3) or *no*. Nothing is deleted on either machine. The
+     button is off while a policy runs or another job of card 3 runs.
+   - **Video settings.** APE encodes the two videos while the run is recorded, with the video
+     settings of the demo archive (`DEFAULT_VIDEO_ARGS` in `src/logger/video_archive_common.py`:
+     H.264 4:4:4, CRF 12, preset medium), at 10 frames per second. A run has no raw images, so
+     there is no compression step before the upload. Measured on the Training machine with one
+     minute of real 960×540 frames per camera: about 79 MB per minute for both cameras, 45 dB
+     PSNR, and about one CPU core while recording (not measured on the Robot PC). The encoders
+     run at `nice 10`, so the policy gets the CPU first; if they fall behind, frames are left out
+     and counted in `video_frames_lost` (`trial.json`). `APE_EVAL_VIDEO_PRESET=veryfast` cuts the
+     CPU time to a third for about 1 dB less. Runs of 2026-11-25 have the earlier settings
+     (4:2:0, CRF 20, about 18 MB per minute, 40 dB); `video_args` in `trial.json` says which.
+     Browsers do not all play H.264 4:4:4, so *Watch the videos* plays a 4:2:0 copy that APE
+     makes in `work/eval_previews/` (not uploaded; it can be deleted at any time).
+   - **`policy_log.h5`** (written by *Upload to the Training machine*, one per run): the inference
+     node's log of that policy start without the images. Per published step: the actions, the
+     non-image observations, and the debug data (the action chunk the model predicted, raw and
+     translated, in the steps in which the model ran; the temporal-ensembling buffer and its
+     mask in every step), gzip-compressed, one array per key over all steps. About 1 to 5 MB per
+     minute, depending on the chunk length (estimated with rwr_il's ensembling code and made-up
+     chunks; not yet made from a real log). The node's own log in `inference_logs/` (about
+     1.4 GB per minute, nearly all of it the images) is not changed, not sent and not deleted;
+     once a run has its `policy_log.h5`, only the network's input images are left that are
+     nowhere else. A run whose inference log is gone is uploaded without `policy_log.h5`.
+   - *Evaluated runs* lists each run with its time, cubes placed, cubes placed in the first 3:00
+     (what the course counts; for runs of 3:00 or more) and the seconds per cube.
+   - *Open* shows one run: the times of the placements counted, the two videos to check them, −
+     and + to correct the count (a + pressed while the videos are open adds a placement at the
+     video's time), and a note.
+   - **How the count works and how far it is checked.** The detector follows the cube on the
+     wooden floor, where it stands out, and counts a placement when the cube reaches the surface
+     of its colour and is then back on the floor, sliding away or lying somewhere else than
+     before. The rule and its thresholds are in `eval_detect.py`. It was built on the red-cube
+     demos of 2026-11-21 and its thresholds were set on them: it finds exactly one placement in
+     each of the 66 single-relocation demos (arena poses a0, a1, a2) and 20 to 32 in the five
+     3 minute demos, whose true numbers are not known. One of those gave 31 instead of 32 once
+     its images had gone through the video compression used here. Counted the way the live
+     helper does (the arena is taken from the last 30 s only), the demos give the same numbers
+     and times, except one 3 minute demo: 19 instead of 20. In that demo the robot pushed the
+     arena about 3 cm aside during the run. Not known: how often a failed attempt of a policy
+     is counted by mistake (the demos hold almost no failures), blue and yellow cubes,
+     daylight. A cube put on another surface is simply not counted.
+   - *Measured automatically* (arm and hand motionless for 5 s or more, number of hand closings,
+     arm path) is read from the signals by fixed rules in `eval_trials.py`, for information.
+   - A live policy started outside the page (`ros2 topic pub`) is recorded as well, without its
+     first moment.
+   - Disk: a run's own files are about 80 MB per minute (nearly all video), and the inference
+     node still writes its log, about 1.4 GB per minute.
+   - Offline test without ROS: `tests/test_eval.py` (needs `fastapi` and `uvicorn`; with
+     `APE_TEST_DEMO` it plays a recorded demo through the recorder and the live count).
+     Folder layout and upload: `python tests/test_eval_upload.py` (numpy and rsync only; a local
+     folder stands in for the Training machine).
+     Try the detector on a file: `python eval_detect.py <oakd_front_view.mp4 or processed demo .h5>`.
 
 The top card shows the robot state in words, with the recovery steps when the arm is in
 reflex or user-stopped.
@@ -158,6 +266,11 @@ browser tab stops nothing.
   `tests/make_policy_config.py` writes a training `config.yaml` for it without training.
   Tests import `server.py`, so a test that calls a NUC endpoint opens a real ssh connection
   to the NUC unless it replaces `nuc.start_controller` first (as `test_inference.py` does).
+- *Prediction time* in the policy card (shown while a policy runs, also in preview): the typical and the slowest time of a
+  prediction over the last 10 s, and a bar for the oldest camera image or robot reading at the end of the slowest prediction,
+  against the inference node's 200 ms limit (dashed line). Green below 150 ms, amber above, red when a step was dropped.
+  It needs the `/policy_inference/timing` topic that was added to `rwr_system/experiments/model_inference_node.py`;
+  with an older node the meter stays hidden. `summarise_timing` in `server.py` does the arithmetic.
 - The policy card reads `APE_POLICY_DIR` (default `~/rwr_humble_ws/policies`). The checks are
   in `policy_checks.py`.
 - Data layout (since 2026-11-21): section 2 takes a session number and an operator; the
@@ -170,7 +283,7 @@ browser tab stops nothing.
 - *Upload to Hugging Face* runs `rwr_data.py push` as the processing job: raw and processed
   recordings that are not uploaded yet, the manifest and the dataset version lists. It needs
   a one-time `pixi run hf auth login` and `rwr_data.py push --repo <user>/<name>` in a
-  terminal, and is refused while a demo is being recorded or saved.
+  terminal. It may run during a recording, at the lowest CPU priority, like processing.
 - The files as they were before the data layout change are in `backup_before_data_layout/`.
 - Live view arm plots: path from above and from the side, measured (blue) and commanded
   (dashed, only while teleop runs), the custom pose as a diamond, plus the readouts *Arm
@@ -187,3 +300,54 @@ browser tab stops nothing.
   under the labels and the *Name in dataset versions* column in section 3 show the file
   name a demo gets in dataset versions (`<session prefix>_<colour>_<number>.h5`), computed
   the same way as in `rwr_data.py`.
+
+## Video archive and transfer
+
+After synchronizing and checking, the processing job runs `archive_job.py transfer` for the session:
+
+1. **Archive** (`src/logger/encode_archive.py`, niced, 2 recordings at a time): each raw recording becomes
+   `data/archive/<session>/<demo>.<camera>.mp4` (libx264 4:4:4, CRF 12, keyframe every 30 frames) plus
+   `<demo>.h5` with every other topic unchanged and the image timestamps, `<demo>.meta.json`, and
+   `<demo>.archive.json` (settings, sha256 of each file, PSNR of every frame against the raw image).
+   About 6 % of the raw file size (about 2.4 MB per second of recording). `src/logger/reconstruct_raw.py` turns it back into a raw-format file that
+   `syncronize_data.py` processes like the original (all non-image data bit for bit; images lossy).
+2. **Copy** with `rsync -a --ignore-existing` to the Training machine: `archive/<session>/` and (unless
+   `archive_transfer_processed` is false) `processed/<session>_10hz/` under its data root. Files that already
+   exist there are never overwritten.
+3. **Verify** with `rsync --checksum --dry-run`: a demo is *verified* when all its archive files (and its
+   processed file) exist on the Training machine with the same content. The same run fetches the Hugging Face
+   markers (below) and shows *verified + HF* for demos whose archive is backed up there.
+4. **Manifest**: `manifest.csv` is copied to `manifest_inbox/robot_pc.csv` on the Training machine (replaced every
+   time). The Training machine's own `manifest.csv` is never overwritten: `rwr_data.py merge-manifest` there adds
+   new rows, keeps its own values (e.g. `keep` or labels corrected there), fills empty fields and lists
+   disagreements in `manifest_conflicts.csv`.
+5. **Hugging Face backup** (on the Training machine, by hand or scheduled there):
+   `python src/logger/hf_backup_archive.py` uploads `archive/<session>/`, `manifest.csv` (the merged one; skipped
+   while `manifest_inbox/` has unmerged changes) and `datasets/*/version.csv` to the private repo in `data/hf_repo.txt`, compares the Hub's sha256 of every
+   archive file with the local file and writes `archive/<session>/<demo>.hf.json` for each demo that matches.
+
+Setup, once per station, in the git-ignored `static/local/station.json` (next to `robot_ip`):
+
+```json
+{"robot_ip": "...", "archive_host": "<ssh alias of the Training machine>", "archive_data_root": "~/rwr_task2/data",
+ "archive_remote_rsync": "~/.local/rsync/rsync", "archive_transfer_processed": true, "archive_require_hf_backup": true}
+```
+
+- `archive_remote_rsync`: the Training machine has no system rsync; an unpacked rsync 3.2.7 with a wrapper
+  lives in `~/.local/rsync/rsync` there (home directory, survives restarts of the instance).
+- `archive_transfer_processed` (default true): also copy and verify the processed files (lossless at 10 Hz).
+  With false only the archive is copied; clearing then deletes the local processed files too, and they can be
+  rebuilt on the Training machine with `reconstruct_raw.py` + `syncronize_data.py` (images from the video).
+- `archive_require_hf_backup` (default true): *Clear transferred demos* only deletes demos that are verified on
+  the Training machine **and** whose archive is on Hugging Face with the same sha256 (`<demo>.hf.json`).
+
+`archive_host` must log in with a key and without any prompt (the job uses ssh `BatchMode`). Both machines
+need rsync 3.2.3 or newer (`--mkpath`). ffmpeg with libx264 must be available on the Robot PC (`ffmpeg`
+on PATH, `$FFMPEG`, or `pip install imageio-ffmpeg`). Without `archive_host` the job only archives.
+The same settings can be given as `$APE_ARCHIVE_HOST`, `$APE_ARCHIVE_DATA_ROOT`, `$APE_REMOTE_RSYNC`,
+`$APE_ARCHIVE_TRANSFER_PROCESSED`, `$APE_ARCHIVE_REQUIRE_HF_BACKUP` (0/1).
+Status files: `work/archive_status/<session>/<demo>.json`. By hand:
+`python ape_ui/archive_job.py {transfer,verify,clear} --data data --session <session> --status-dir work/archive_status --host <alias>`.
+
+The Hugging Face upload is unchanged: it uploads what is on disk, so upload before clearing if the raw
+recordings should also go to Hugging Face.

@@ -71,6 +71,15 @@ label { color: var(--muted); font-size: 14px; display: inline-flex; align-items:
 .note { margin-top: 10px; padding: 9px 12px; border-radius: 8px; font-size: 14px; }
 .note.warn { background: var(--warn-bg); color: var(--warn); }
 .note.bad { background: var(--bad-bg); color: var(--bad); }
+/* policy card: how old the readings are when a prediction is finished, against the inference node's limit (at 80% of the bar) */
+.lat { margin-top: 12px; max-width: 560px; font-size: 14px; }
+.lat-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+.lat-bar { position: relative; height: 14px; margin-top: 6px; border-radius: 4px; background: var(--idle-bg); overflow: hidden; }
+.lat-fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--ok); }
+.lat-fill.warn { background: var(--warn); } .lat-fill.bad { background: var(--bad); }
+.lat-mark { position: absolute; top: 0; bottom: 0; width: 3px; background: var(--ink); }
+.lat-limit { position: absolute; top: 0; bottom: 0; left: 80%; border-left: 2px dashed var(--bad); }
+.lat-scale { display: flex; justify-content: space-between; width: 80%; color: var(--muted); font-size: 12px; }
 .note code, .muted code { font-size: 12.5px; word-break: break-all; }
 .term { background: var(--term); border-radius: 8px; padding: 8px; margin-top: 12px; height: 340px; overflow: hidden; }
 .term.small { height: 260px; }
@@ -323,6 +332,7 @@ input[type=range] { width: 100%; }
         <button class="primary" id="pol-preview" title="Loads the policy and starts the cameras and the ORCA hand. The policy's outputs are only shown, nothing is sent to the arm or the hand.">Start preview</button>
         <button class="rec" id="pol-live" title="Loads the policy and starts the cameras and the ORCA hand. Once you press Start policy, its outputs drive the arm and the hand.">Start live</button>
         <button class="danger" id="pol-stop">Stop</button>
+        <button id="pol-center" hidden title="The same move as Move to center in the Operate card: smooth, about 10 cm per second. Works without the station launch and before or after a policy run, not while the policy drives the arm.">Move to center</button>
       </div>
     </div>
     <div class="muted" id="pol-info"></div>
@@ -330,6 +340,12 @@ input[type=range] { width: 100%; }
       <div class="op-state idle" id="pol-state"></div>
       <div class="op-timer" id="pol-timer"></div>
       <div class="muted" id="pol-sub"></div>
+      <div id="pol-lat" class="lat" hidden title="Measured by the inference node at every policy step. A prediction is a step in which the model runs; the steps in between read the stored plan. The inference node drops the action when any camera image or robot reading is older than the limit by the time the prediction is finished.">
+        <div class="lat-head"><b>Prediction time</b> <span id="pol-lat-text"></span></div>
+        <div class="lat-bar"><div class="lat-fill" id="pol-lat-fill"></div><div class="lat-mark" id="pol-lat-mark"></div><div class="lat-limit"></div></div>
+        <div class="lat-scale"><span>0</span><span id="pol-lat-limit"></span></div>
+        <div class="muted" id="pol-lat-sub"></div>
+      </div>
       <div class="row" style="margin-top:10px">
         <button class="primary big-btn" id="pol-go">Start policy</button>
         <button id="pol-init" title="The arm moves slowly (2 cm per second) to the center pose: the same pose as Move to center in the Operate card.">Move to center</button>
@@ -341,6 +357,33 @@ input[type=range] { width: 100%; }
     <div class="scroll"><table class="t" id="pol-checks"></table></div>
     <details id="inference-details"><summary>Log</summary><div class="term small" id="term-inference"></div></details>
   </section>
+
+  <section class="card" id="ev-card">
+    <div class="row head">
+      <div class="row"><h2>5 · Evaluate policy</h2><span class="pill" id="ev-pill">Idle</span></div>
+    <div class="muted" id="ev-info"></div>
+    <div style="margin-top:12px">
+      <div class="op-state idle" id="ev-state"></div>
+      <div class="op-timer" id="ev-timer"></div>
+      <div class="muted" id="ev-sub"></div>
+      <div class="muted" id="ev-track" style="margin-top:6px"></div>
+    </div>
+    <div id="ev-notes"></div>
+    <div id="ev-review"></div>
+    <div id="ev-player" style="display:none; margin-top:12px">
+      <div class="row" style="justify-content:space-between"><p class="sub-h" id="ev-pl-title" style="margin:0"></p><button id="ev-pl-close">Close</button></div>
+      <div class="row" style="margin-top:8px; align-items:flex-start; flex-wrap:nowrap">
+        <video id="ev-v-front" controls muted preload="metadata" style="flex:2; min-width:0; border-radius:8px; background:var(--term)"></video>
+        <video id="ev-v-wrist" muted preload="metadata" style="flex:1; min-width:0; border-radius:8px; background:var(--term)"></video>
+      </div>
+      <div class="muted" style="margin-top:4px">Workspace camera left, wrist camera right (as recorded, not turned). Video time is run time. The + button above adds a placement at the time the video shows.</div>
+    </div>
+    <div class="row" style="margin-top:16px; justify-content:space-between">
+      <p class="sub-h" style="margin:0" id="ev-trials-s">Evaluated runs</p>
+      <div class="row"><span class="muted" id="ev-upload-s"></span><button id="ev-upload" title="Copies every evaluated run (videos, signals, trial.json, and policy_log.h5: the actions and debug data from the inference log, without its images) and trials.csv to the Training machine and compares the checksums there. Files that are already there are not sent again. Nothing is deleted.">Upload to the Training machine</button></div>
+    </div>
+    <div class="scroll"><table class="t" id="ev-trials"></table></div>
+  </section>
   </div>
   <div class="col">
   <section class="card">
@@ -349,6 +392,7 @@ input[type=range] { width: 100%; }
       <div class="row">
         <label>Session <select id="ds-select"></select></label>
         <button class="primary" id="ds-process">Process and check new demos</button>
+        <button class="danger" id="ds-clear" title="Deletes the raw, processed and archive files of this session's demos that are copied to the Training machine and match there byte for byte (checked again right before deleting). The demo settings files and manifest.csv stay.">Clear transferred demos</button>
         <button id="ds-upload" title="Uploads all raw and processed recordings that are not on Hugging Face yet, plus manifest.csv and the dataset version lists">Upload to Hugging Face</button>
         <button class="danger" id="job-stop">Stop</button>
       </div>
@@ -373,6 +417,22 @@ input[type=range] { width: 100%; }
 <script src="/static/vendor/xterm-addon-fit.js"></script>
 <script>
 const $ = id => document.getElementById(id);
+// Policy card: the prediction time meter. The bar is the oldest reading at the end of the slowest prediction of the
+// last 10 s, the black mark is the typical prediction time, the dashed line is the inference node's limit.
+function polLatency(p) {
+  const t = p.timing, box = $('pol-lat');
+  box.hidden = !(p.policy_on && t);
+  if (box.hidden) return;
+  const pct = ms => Math.min(100, 80 * ms / t.limit_ms) + '%';
+  const cls = t.dropped || t.age_max_ms > t.limit_ms ? 'bad' : t.age_max_ms > 0.75 * t.limit_ms ? 'warn' : '';
+  $('pol-lat-fill').style.width = pct(t.age_max_ms); $('pol-lat-fill').className = 'lat-fill ' + cls;
+  $('pol-lat-mark').style.left = pct(t.predict_ms);
+  $('pol-lat-limit').textContent = t.limit_ms + ' ms limit';
+  $('pol-lat-text').textContent = `${t.predict_ms} ms typical, ${t.predict_max_ms} ms slowest in the last 10 s (${t.predictions} prediction${t.predictions === 1 ? '' : 's'})`;
+  $('pol-lat-sub').textContent = `Oldest reading when a prediction was finished: ${t.age_max_ms} ms of ${t.limit_ms} ms allowed. `
+    + (t.dropped_total ? `${t.dropped_total} step${t.dropped_total === 1 ? '' : 's'} dropped since the policy was started. ` : 'No step dropped since the policy was started. ')
+    + `Slowest prediction since then: ${t.predict_max_total_ms} ms.`;
+}
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 function toast(msg, info) {
@@ -427,7 +487,7 @@ for (const n of ['nuc', 'recording', 'job', 'inference']) {
 
 /* ---------- actions ---------- */
 /* ---------- session name: s<number>_<date>_<operator> ---------- */
-let DS = [], sesChecked = false;
+let DS = [], sesChecked = false, ARCHIVE_HOST_SET = false, ARCHIVE_REQUIRE_HF = true, JOB_RUNNING = false;
 const today = () => { const d = new Date(), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
 const sesNumber = name => { const m = /^s(\d+)_/.exec(name); return m ? parseInt(m[1], 10) : null; };
 const nextSesNo = () => Math.max(0, ...DS.map(d => sesNumber(d.name)).filter(n => n != null)) + 1;
@@ -502,7 +562,7 @@ $('op-discard').onclick = () => { if (confirm('Discard this demo? It cannot be r
 const moveAsk = (what, d) => confirm(`Move the arm to the ${what} now? It is ${d != null ? Math.round(d * 100) + ' cm away (about ' + Math.max(1, Math.round(d / 0.10)) + ' s)' : 'an unknown distance away'}. The arm moves by itself, slowly. Keep clear and keep a hand on the stop button.`);
 $('op-init').onclick = () => { if (moveAsk('saved custom pose', OP && OP.start_pose && OP.start_pose.distance)) ctl('move2init'); };
 for (const b of $('tg-after').querySelectorAll('button')) b.onclick = () => ctl('after_stop', {value: b.dataset.a});
-$('op-center').onclick = () => { if (moveAsk('center pose', OP && OP.center && OP.center.distance)) ctl('move2center'); };
+$('op-center').onclick = () => { if (OP && OP.moving) return ctl('move_stop'); if (moveAsk('center pose', OP && OP.center && OP.center.distance)) ctl('move2center'); };
 $('op-setinit').onclick = () => { if (confirm((OP && OP.start_pose && OP.start_pose.saved ? 'Replace the saved custom pose' : 'Save the custom pose') + ' with the pose the arm is in right now?')) ctl('set_start'); };
 for (const [id, action] of [['tg-accurate', 'accurate'], ['tg-coil', 'coil_reverse'], ['tg-follow', 'hand_follow'], ['tg-torque', 'hand_torque']])
   for (const b of $(id).querySelectorAll('button')) b.onclick = () => ctl(action, {on: b.dataset.v === '1'});
@@ -553,16 +613,22 @@ function renderOperate(s) {
   pauseOnly.style.display = (o.active && haveLog && o.rec === 'idle' && !o.mustPause) ? '' : 'none'; pauseOnly.textContent = 'Pause teleop';
   $('op-review').style.display = o.rec === 'review' ? 'flex' : 'none';
   $('op-msg').innerHTML = o.message ? `<div class="note warn">${esc(o.message)}</div>` : '';
-  $('op-toggles').classList.toggle('dim', !available);
+  // without a launch only Move to center stays usable (the server's arm mover); the other switches need the launch
+  const moverRow = $('op-center').closest('.toggle'), keepCenter = (s.features || []).includes('mover');
+  $('op-toggles').classList.remove('dim');
+  for (const t of $('op-toggles').children) t.classList.toggle('dim', !available && !(keepCenter && t === moverRow));
   seg('tg-accurate', o.accurate, !!SV.accurate && !o.teleop_running);
   seg('tg-coil', !!o.coil_yaw_deg, !o.teleop_running && o.rec === 'idle');
   $('op-coil-d').textContent = (o.coil_yaw_deg && Math.abs(o.coil_yaw_deg) !== 180 ? `Glove directions are turned by ${o.coil_yaw_deg}° (set in the station file). ` : '') + 'Turn on if the arm moves opposite to your hand. Sideways and forward/back reverse together; up/down stays. Change only while paused.';
   seg('tg-follow', o.hand_following, haveHand);
   seg('tg-torque', o.torque, !!SV.hand_torque);
-  const sp = o.start_pose || {}, ce = o.center || {}, canMove = !o.teleop_running && !o.moving && !!(r && r.mode === 'ready');
+  const sp = o.start_pose || {}, ce = o.center || {}, canMove = !o.teleop_running && !o.policy_running && !o.moving && !!(r && r.mode === 'ready');
+  const haveMover = (s.features || []).includes('mover');   // the server starts the arm teleop node by itself for Move to center
   const cm = v => Math.round(v * 100) + ' cm', tooFar = v => v != null && v > o.max_move;
   $('op-init').disabled = !SV.move2init || !canMove || !sp.saved || sp.distance == null || tooFar(sp.distance);
-  $('op-center').disabled = !SV.move2center || !canMove || ce.distance == null || tooFar(ce.distance);
+  const oc = $('op-center'), ocLabel = o.moving ? 'Stop move' : 'Move to center';   // also the way to stop a move started without a launch
+  if (oc.textContent !== ocLabel) oc.textContent = ocLabel; oc.className = o.moving ? 'rec' : '';
+  oc.disabled = busy || (!o.moving && (!(SV.move2center || haveMover) || !canMove || ce.distance == null || tooFar(ce.distance)));
   $('op-setinit').disabled = !SV.set_start || o.teleop_running || !!o.moving || !r;
   $('op-init-d').textContent = !sp.saved ? 'No custom pose saved yet. Bring the arm to the pose you want (teleop, then pause), then press Set.'
     : sp.distance == null ? 'A custom pose is saved. Arm position unknown.'
@@ -703,7 +769,7 @@ let PL = null;
 const STREAMS = {arm_state: 'Arm state (Franka)', arm_pose: 'Arm pose', arm_cmd: 'Arm commands', hand: 'Hand joints (measured)', hand_cmd: 'Hand commands', hand_current: 'Hand motor current', hand_temp: 'Hand motor temperature', glove: 'Glove (right wrist)', oakd_front_view: 'Workspace camera', oakd_wrist_view: 'Wrist camera'};
 async function loadDatasets() {
   try {
-    const r = await (await fetch('/api/datasets', {cache: 'no-store'})).json(); DS = r.datasets;
+    const r = await (await fetch('/api/datasets', {cache: 'no-store'})).json(); DS = r.datasets; ARCHIVE_HOST_SET = !!r.archive_host_set; ARCHIVE_REQUIRE_HF = r.archive_require_hf !== false;
     if (!sesChecked) { sesChecked = true; if (!(parseInt($('ses-no').value, 10) > 0) || sessionClash()) { $('ses-no').value = nextSesNo(); saveSession(); } }   // first load: never start on a number another session owns
     updateSession();
     const sel = $('ds-select'), cur = sel.value || (() => { try { return localStorage.getItem('ds') || ''; } catch (e) { return ''; } })();
@@ -715,12 +781,18 @@ async function loadDatasets() {
 function renderDemos() {
   const d = DS.find(x => x.name === $('ds-select').value);
   if (!d) { $('demo-table').innerHTML = ''; $('ds-info').textContent = 'No recordings yet.'; $('ds-process').disabled = true; return; }
-  $('ds-info').innerHTML = `${d.demos.length} demo${d.demos.length === 1 ? '' : 's'}, ${d.total_gb} GB on disk. ${d.todo ? `<b>${d.todo}</b> not processed or not checked yet.` : 'All processed and checked.'} Training reads a dataset version built from <code>manifest.csv</code>, not this folder.`;
-  let h = '<tr><th>Demo</th><th>Name in dataset versions</th><th>Colour</th><th class="r">Raw GB</th><th class="r">Processed GB</th><th class="r">Length</th><th class="r">Frames</th><th>Check</th><th></th></tr>';
+  const notCopied = d.demos.filter(m => !m.archive || !['verified', 'cleared'].includes(m.archive.state)).length;
+  $('ds-info').innerHTML = `${d.demos.length} demo${d.demos.length === 1 ? '' : 's'}, ${d.total_gb} GB on disk. ${d.todo ? `<b>${d.todo}</b> not processed or not checked yet.` : 'All processed and checked.'} `
+    + (ARCHIVE_HOST_SET ? `${notCopied ? `<b>${notCopied}</b> not yet verified on the Training machine.` : 'All verified on the Training machine.'} ${d.clearable ? `${d.clearable} verified` + (ARCHIVE_REQUIRE_HF ? `, ${d.clearable_hf} of them also backed up on Hugging Face at the last check (clearing needs both; it checks again)` : '') + ` (${d.clearable_gb} GB).` : ''} ` : 'No Training machine set (<code>archive_host</code> in <code>static/local/station.json</code>): demos are archived but not copied. ')
+    + `Training reads a dataset version built from <code>manifest.csv</code>, not this folder.`;
+  $('ds-clear').disabled = !ARCHIVE_HOST_SET || !d.clearable || JOB_RUNNING;
+  let h = '<tr><th>Demo</th><th>Name in dataset versions</th><th>Colour</th><th class="r">Raw GB</th><th class="r">Processed GB</th><th class="r">Length</th><th class="r">Frames</th><th>Check</th><th>Archive / Training machine</th><th></th></tr>';
+  const ARC = {archived: ['muted', 'archived'], archive_failed: ['tag-bad', 'archive failed'], not_verified: ['tag-warn', 'not verified'], verified: ['tag-ok', 'verified'], verified_hf: ['tag-ok', 'verified + HF'], cleared: ['tag-ok', 'cleared here']};
   for (const m of [...d.demos].reverse()) {
-    const c = m.check;
-    const chk = m.processed_gb == null ? '<span class="muted">not processed</span>' : !c ? '<span class="muted">not checked</span>' : c.ok ? '<span class="tag-ok">ok</span>' : `<span class="tag-bad" title="${esc(c.errors.join('\n'))}">problems: ${esc(c.errors[0] || '')}</span>`;
-    h += `<tr class="${PL && PL.demo === m.name && PL.dataset === d.name ? 'sel' : ''}"><td title="${esc(m.description || '')}">${esc(m.name)}${m.description ? ' <span class="muted" title="' + esc(m.description) + '">✎</span>' : ''}</td><td>${m.dataset_name ? esc(m.dataset_name) : '<span class="muted">–</span>'}</td><td>${m.colour ? esc(m.colour) : '<span class="muted">–</span>'}${m.keep && m.keep !== 'keep' ? ' <span class="muted">(' + esc(m.keep) + ')</span>' : ''}</td><td class="r">${m.raw_gb == null ? '–' : m.raw_gb.toFixed(2)}</td><td class="r">${m.processed_gb == null ? '–' : m.processed_gb.toFixed(2)}</td><td class="r">${c && c.duration_s != null ? mmss(c.duration_s) : '–'}</td><td class="r">${c && c.frames != null ? c.frames : '–'}</td><td>${chk}</td><td class="r">${m.processed_gb != null ? `<button data-demo="${esc(m.name)}">View</button>` : ''}</td></tr>`;
+    const c = m.check, a = m.archive;
+    const chk = a && a.state === 'cleared' ? '<span class="muted">–</span>' : m.processed_gb == null ? '<span class="muted">not processed</span>' : !c ? '<span class="muted">not checked</span>' : c.ok ? '<span class="tag-ok">ok</span>' : `<span class="tag-bad" title="${esc(c.errors.join('\n'))}">problems: ${esc(c.errors[0] || '')}</span>`;
+    const arc = !a ? '<span class="muted">not archived</span>' : `<span class="${ARC[a.state === 'verified' && a.hf ? 'verified_hf' : a.state][0]}" title="${esc(a.text)}">${ARC[a.state === 'verified' && a.hf ? 'verified_hf' : a.state][1]}</span>${a.archive_mb != null ? ' <span class="muted">' + a.archive_mb + ' MB</span>' : ''}`;
+    h += `<tr class="${PL && PL.demo === m.name && PL.dataset === d.name ? 'sel' : ''}"><td title="${esc(m.description || '')}">${esc(m.name)}${m.description ? ' <span class="muted" title="' + esc(m.description) + '">✎</span>' : ''}</td><td>${m.dataset_name ? esc(m.dataset_name) : '<span class="muted">–</span>'}</td><td>${m.colour ? esc(m.colour) : '<span class="muted">–</span>'}${m.keep && m.keep !== 'keep' ? ' <span class="muted">(' + esc(m.keep) + ')</span>' : ''}</td><td class="r">${m.raw_gb == null ? '–' : m.raw_gb.toFixed(2)}</td><td class="r">${m.processed_gb == null ? '–' : m.processed_gb.toFixed(2)}</td><td class="r">${c && c.duration_s != null ? mmss(c.duration_s) : '–'}</td><td class="r">${c && c.frames != null ? c.frames : '–'}</td><td>${chk}</td><td>${arc}</td><td class="r">${m.processed_gb != null ? `<button data-demo="${esc(m.name)}">View</button>` : ''}</td></tr>`;
   }
   $('demo-table').innerHTML = h;
   for (const b of $('demo-table').querySelectorAll('button')) b.onclick = () => openDemo(d.name, b.dataset.demo);
@@ -729,6 +801,11 @@ $('ds-select').onchange = () => { try { localStorage.setItem('ds', $('ds-select'
 $('ds-upload').onclick = async () => { $('job-details').open = true; await post('/api/upload'); };
 $('ds-process').onclick = async () => { const n = $('ds-select').value; if (!n) return; $('job-details').open = true; await post(`/api/datasets/${encodeURIComponent(n)}/process`); loadDatasets(); };
 $('job-stop').onclick = () => post('/api/job/stop');
+$('ds-clear').onclick = async () => {
+  const d = DS.find(x => x.name === $('ds-select').value); if (!d || !d.clearable) return;
+  if (!confirm(`Delete ${d.clearable} demo(s) of ${d.name} from this PC (${d.clearable_gb} GB of raw and processed files, plus their archive copies)?\n\nOnly demos whose files are on the Training machine and match byte for byte${ARCHIVE_REQUIRE_HF ? ', and whose archive is backed up on Hugging Face,' : ''} are deleted; this is checked again right before deleting. The demo settings files and manifest.csv stay. This cannot be undone on this PC.`)) return;
+  $('job-details').open = true; await post(`/api/datasets/${encodeURIComponent(d.name)}/clear`); loadDatasets();
+};
 async function openDemo(dataset, demo) {
   closeDemo();
   let meta; try { const r = await fetch(`/api/demo/${encodeURIComponent(dataset)}/${encodeURIComponent(demo)}/meta`); if (!r.ok) throw 0; meta = await r.json(); } catch (e) { return toast('This demo could not be opened.'); }
@@ -850,6 +927,10 @@ $('pol-init').onclick = () => {
   const ask = polCenter(INF) ? 'Move the arm to the center pose' + (dist != null ? ` (${(dist * 100).toFixed(0)} cm away)` : '') + '?' : 'Move the arm to the pose where the training demos start?';
   if (confirm(ask + '\n\nThe arm moves by itself, slowly (about 2 cm per second), in a straight line. Keep clear and keep a hand on the stop button. Stop policy halts the move.')) polCmd('init_arm');
 };
+$('pol-center').onclick = () => {
+  if (OP && OP.moving) return ctl('move_stop');
+  if (moveAsk('center pose', OP && OP.center && OP.center.distance)) ctl('move2center');
+};
 $('pol-run').onchange = () => { store('pol_run', $('pol-run').value); fillPolicies(); store('pol_ckpt', $('pol-ckpt').value); loadChecks(); };
 $('pol-ckpt').onchange = () => { store('pol_ckpt', $('pol-ckpt').value); loadChecks(); };
 function polView(p, robot) {   // what the loaded policy is doing, for this card and for the Operate card
@@ -886,15 +967,25 @@ function renderPolicy(s) {
   $('pol-run').disabled = $('pol-ckpt').disabled = p.running;
   $('pol-preview').disabled = $('pol-live').disabled = p.running || ext || other || !chosen;
   $('pol-stop').disabled = !p.running || p.stopping;
+  const haveMover = (s.features || []).includes('mover'), pc = $('pol-center');
+  pc.hidden = !haveMover;
+  if (haveMover) {
+    const o = OP || {}, ce = o.center || {}, moving = !!o.moving;
+    const drives = p.running && (p.policy_on || p.init === 'moving');
+    const label = moving ? 'Stop move' : 'Move to center'; if (pc.textContent !== label) pc.textContent = label;
+    pc.className = moving ? 'rec' : '';
+    pc.disabled = busy || (!moving && (drives || o.teleop_running || !(polRobot && polRobot.mode === 'ready') || ce.distance == null || ce.distance > o.max_move));
+  }
   $('pol-box').style.display = v ? '' : 'none';
   let notes = '';
   if (v) {
     $('pol-state').textContent = v.state; $('pol-state').className = 'op-state ' + v.cls; $('pol-sub').textContent = v.sub;
     $('pol-timer').textContent = p.policy_on ? mmss(p.policy_for) : '';
+    polLatency(p);
     const go = $('pol-go'); if (go.textContent !== v.go) go.textContent = v.go; go.className = v.goCls; go.disabled = !v.goOn || polBusy;
     const idle = p.node_ready && !p.policy_on && p.init !== 'moving' && !p.stopping;
     $('pol-reset').disabled = !idle || polBusy;
-    $('pol-init').style.display = !p.preview && p.arm_init ? '' : 'none';
+    $('pol-init').style.display = !p.preview && p.arm_init && !haveMover ? '' : 'none';
     const initLabel = polCenter(p) ? 'Move to center' : 'Move arm to the demos\' start pose'; if ($('pol-init').textContent !== initLabel) $('pol-init').textContent = initLabel;
     $('pol-init').title = polCenter(p) ? 'The arm moves slowly (2 cm per second) to the center pose: the same pose as Move to center in the Operate card.' : 'The inference node moves the arm slowly (2 cm per second) to the pose where the training demos start.'; $('pol-init').disabled = !idle || polBusy || !(polRobot && polRobot.mode === 'ready');
     if (!p.node_ready && !p.stopping && p.age > 120) notes += W('warn', 'Loading takes unusually long. Open the Log below: the policy may have failed to load.');
@@ -915,6 +1006,120 @@ function renderPolicy(s) {
   renderChecks();
 }
 setInterval(() => { if (!document.hidden && polHave) loadPolicies().then(loadChecks); }, 4000);
+
+/* ---------- evaluation of policy runs ---------- */
+let EV = null, EVL = {trials: [], total: 0}, evUploading = false, evHave = false, evBusy = false, evSel = null, evLast = null, evShown = {};
+async function loadEval() {
+  if (!evHave) return;
+  try { const r = await fetch('/api/eval', {cache: 'no-store'}); if (r.ok) { EVL = await r.json(); renderEvalLists(); } } catch (e) {}
+}
+const evShort = t => esc((t.run || '').replace(/^(\d{8}-\d{6})_.*/, '$1')) + ' · ' + esc((t.ckpt || '').replace(/^checkpoints\//, '').replace(/\.pth$/, ''));
+const evEnd = t => esc((EV && EV.end_reasons[t.end_reason]) || t.end_reason || '');
+const evCounting = t => !t.live && !!(t.detection && t.detection.state === 'running');   // no live count: wait for the count from the video
+const evDiffer = t => !!(t.live && t.detection && t.detection.state === 'done' && !t.detection.problem && t.detection.placed.length !== t.live.placed.length);
+const evUp = t => ({uploaded: '<span title="Copied to the Training machine and verified there by checksum">yes</span>', changed: '<span class="tag-warn" title="The note or the count was changed after the upload: upload again">changed since</span>', different: '<span class="tag-warn" title="A file of this run is missing on the Training machine or has other content there: see the log in card 3">not verified</span>'})[t.upload] || '<span class="muted">no</span>';
+function renderUpload() {
+  const u = EVL.upload, b = $('ev-upload');
+  if (!u) { b.style.display = 'none'; $('ev-upload-s').textContent = ''; return; }   // the server is older than this page
+  const busy = EV && EV.state !== 'idle', todo = EVL.total - u.uploaded;
+  b.style.display = ''; b.disabled = !u.host_set || JOB_RUNNING || busy || !EVL.total;
+  $('ev-upload-s').innerHTML = !u.host_set ? 'No Training machine is set (<code>archive_host</code> in station.json).'
+    : evUploading ? 'Uploading… (log in card 3)'
+    : !EVL.total ? '' : todo ? `${todo} of ${EVL.total} not on the Training machine${u.changed ? ` (${u.changed} changed since the upload)` : ''}${u.different ? ` · <span class="tag-warn">${u.different} not verified</span>` : ''}`
+    : `All ${EVL.total} on the Training machine` + (u.checked_at ? ` (checked ${esc(u.checked_at)})` : '');
+}
+$('ev-upload').onclick = async () => { $('job-details').open = true; await post('/api/eval/upload'); };
+function setHtml(id, html) { if (evShown[id] !== html) { evShown[id] = html; $(id).innerHTML = html; } }
+function renderEvalLists() {
+  $('ev-trials-s').textContent = `Evaluated runs (${EVL.total})` + (EVL.total > EVL.trials.length ? `, the newest ${EVL.trials.length} shown` : '');
+  setHtml('ev-trials', !EVL.trials.length ? '<tr><td class="muted">No run has been evaluated yet.</td></tr>'
+    : '<tr><th>Started</th><th>Policy</th><th class="r">Time</th><th class="r" title="Counted live from the workspace camera; corrections made in Open are included.">Cubes placed</th><th class="r" title="Cubes placed in the first 3:00 of the run, the time the course counts. Only for runs of 3:00 or longer.">In first 3:00</th><th class="r" title="Run time divided by cubes placed.">Seconds per cube</th><th>Ended</th><th title="Is this run on the Training machine? Set by Upload to the Training machine.">Uploaded</th><th></th></tr>'
+    + EVL.trials.map(t => { const r = t.result || {}; return `<tr class="${t.id === evSel ? 'sel' : ''}"><td>${esc(t.started || t.id)}</td><td title="${esc(t.run)} / ${esc(t.ckpt)}">${evShort(t)}</td><td class="r">${mmss(t.duration_s)}</td><td class="r">${evCounting(t) ? '<span class="muted">counting…</span>' : '<b>' + (r.placed ?? '') + '</b>' + (evDiffer(t) ? ' <span class="tag-warn" title="The recount from the saved video gave another number: open the run">*</span>' : '')}</td><td class="r">${t.duration_s >= EV.graded_seconds && !evCounting(t) ? r.placed_180 : '–'}</td><td class="r">${r.seconds_per_cube ?? '–'}</td><td>${evEnd(t)}</td><td>${evUp(t)}</td><td><button data-open="${esc(t.id)}">Open</button></td></tr>`; }).join(''));
+  renderUpload();
+  renderReview();
+}
+$('ev-trials').addEventListener('click', e => { const b = e.target.closest('button[data-open]'); if (b) { evSel = b.dataset.open; evShown['ev-trials'] = ''; renderEvalLists(); $('ev-review').scrollIntoView({block: 'nearest'}); } });
+function renderReview() {
+  const t = EVL.trials.find(x => x.id === evSel), box = $('ev-review');
+  if (!t) { setHtml('ev-review', ''); return; }
+  if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;   // do not rebuild while a note is being typed
+  const r = t.result || {}, a = t.auto || {}, tm = t.timing || {}, playing = $('ev-player').dataset.id === t.id;
+  let h = `<div class="check" style="margin-top:12px"><div class="row" style="justify-content:space-between"><div><div class="k">Run ${esc(t.id)} · ${evShort(t)}</div>`
+    + `<div class="v">${evCounting(t) ? 'Counting the placed cubes from the video…' : `${r.placed} cube${r.placed === 1 ? '' : 's'} placed`} in ${mmss(t.duration_s)}${t.duration_s >= EV.graded_seconds ? `, ${r.placed_180} in the first ${mmss(EV.graded_seconds)}` : ''} · ${evEnd(t)}</div></div>`
+    + `<div class="row"><button data-act="video">${playing ? 'Close videos' : 'Watch the videos'}</button><button data-act="close">Close</button></div></div>`;
+  h += `<div class="row" style="margin-top:8px; gap:4px"><span>Cubes placed: <b class="num">${r.placed}</b></span><button data-act="remove" data-k="placed" style="padding:2px 9px" title="Remove the last placement"${r.placed ? '' : ' disabled'}>−</button><button data-act="add" data-k="placed" style="padding:2px 9px" title="Add a placement${playing ? ' at the time the video shows' : ' (without a time; open the videos to add it at a time)'}">+</button></div>`;
+  const marks = (t.events || []).map(e => (e.t == null ? 'no time' : mmss(e.t)) + (e.source === 'operator' ? ' (added by hand)' : ''));
+  if (marks.length) h += `<div class="muted" style="margin-top:6px">Cube placed at: ${marks.join(' · ')}</div>`;
+  const det = t.detection || {};
+  if (t.live) h += `<div class="muted" style="margin-top:4px" title="Counted by eval_detect.py from the workspace camera while the policy ran. Checked on the red-cube demos only.">Counted live: ${t.live.placed.length} (cube colour seen: ${esc(t.live.colour || 'unknown')})${t.live.problem ? ' · ' + esc(t.live.problem) : ''}.</div>`;
+  if (det.state === 'running') h += '<div class="muted" style="margin-top:4px">Counting again from the saved video…</div>';
+  else if (det.state === 'done' && det.problem) h += `<div class="note warn">The cubes could not be counted from the saved video: ${esc(det.problem)}.</div>`;
+  else if (det.state === 'done' && evDiffer(t)) h += `<div class="note warn">Counted again from the saved video: <b>${det.placed.length}</b>, not ${t.live.placed.length} (at ${det.placed.map(mmss).join(' · ') || 'no time'}). Watch the videos to see which is right; − and + correct the count.</div>`;
+  else if (det.state === 'done') h += `<div class="muted" style="margin-top:4px">Counted again from the saved video: ${det.placed.length}${t.live ? ', the same' : ' (there was no live count)'}. − and + correct the count.</div>`;
+  const auto = [];
+  if (a.still_s != null) auto.push(`arm and hand motionless for ${a.still_s} s in ${a.still.length} interval${a.still.length === 1 ? '' : 's'} of ${5} s or more${a.still.length ? ' (at ' + a.still.map(x => mmss(x.t)).join(', ') + ')' : ''}`);
+  if (a.hand_closings != null) auto.push(`hand closed ${a.hand_closings} time${a.hand_closings === 1 ? '' : 's'}`);
+  if (a.arm_path_m != null) auto.push(`arm path ${a.arm_path_m} m`);
+  if (tm.predict_ms != null) auto.push(`prediction time ${tm.predict_ms} ms, ${tm.dropped_total} skipped step${tm.dropped_total === 1 ? '' : 's'}`);
+  if (auto.length) h += `<div class="muted" style="margin-top:4px" title="Read from the arm and hand signals by a fixed rule. Not yet compared with what an observer saw.">Measured automatically: ${auto.join(' · ')}.</div>`;
+  if ((t.recording_problems || []).length) h += `<div class="note warn">The recording is incomplete: ${esc(t.recording_problems.join('; '))}.</div>`;
+  if ((t.failed_checks || []).length) h += `<div class="note warn">Run although a check failed: ${esc(t.failed_checks.join('; '))}.</div>`;
+  if (t.stop_note) h += `<div class="note warn">${esc(t.stop_note)}</div>`;
+  if (t.started_outside_page) h += '<div class="note warn">This policy run was not started with this page, so its first moment is missing.</div>';
+  h += `<div class="row" style="margin-top:8px"><label style="flex:1">Note <input type="text" id="ev-r-note" value="${esc(t.note || '')}" maxlength="500" style="flex:1; width:auto" spellcheck="false"></label><button data-act="note">Save note</button></div>`;
+  h += `<div class="muted" style="margin-top:4px; font-size:13px">Saved in <code>${esc(EVL.folder)}/${esc(t.id)}/</code>${t.inference_log ? ` · inference node log: <code>${esc(t.inference_log)}</code>` : ''}</div></div>`;
+  setHtml('ev-review', h);
+}
+function evPlayer(id) {
+  const box = $('ev-player'), f = $('ev-v-front'), w = $('ev-v-wrist');
+  if (!id) { f.pause(); w.pause(); f.removeAttribute('src'); w.removeAttribute('src'); box.style.display = 'none'; box.dataset.id = ''; return; }
+  box.dataset.id = id; box.style.display = ''; $('ev-pl-title').textContent = 'Run ' + id;
+  f.src = `/api/eval/trial/${id}/oakd_front_view.mp4`; w.src = `/api/eval/trial/${id}/oakd_wrist_view.mp4`;
+}
+{ const f = $('ev-v-front'), w = $('ev-v-wrist');   // the wrist video follows the workspace video
+  f.onplay = () => { w.currentTime = f.currentTime; w.play().catch(() => {}); }; f.onpause = () => w.pause();
+  f.onseeked = () => { w.currentTime = f.currentTime; }; f.onratechange = () => { w.playbackRate = f.playbackRate; }; }
+$('ev-pl-close').onclick = () => { evPlayer(null); evShown['ev-review'] = ''; renderReview(); };
+$('ev-review').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-act]'), t = EVL.trials.find(x => x.id === evSel); if (!b || !t) return;
+  const act = b.dataset.act, url = '/api/eval/trial/' + t.id, playing = $('ev-player').dataset.id === t.id;
+  if (act === 'close') { evSel = null; evPlayer(null); }
+  else if (act === 'video') evPlayer(playing ? null : t.id);
+  else if (act === 'note') await post(url, {note: $('ev-r-note').value});
+  else if (act === 'add') await post(url, {add: b.dataset.k, t: playing ? Math.round($('ev-v-front').currentTime * 10) / 10 : null});
+  else if (act === 'remove') await post(url, {remove: b.dataset.k});
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  evShown['ev-review'] = ''; evShown['ev-trials'] = ''; await loadEval();
+});
+function renderEval(s) {
+  const was = evHave; evHave = (s.features || []).includes('eval'); EV = evHave ? s.eval : null;
+  if (!evHave) { pill($('ev-pill'), 'Not available', ''); $('ev-notes').innerHTML = '<div class="note warn">Restart APE to use this card: the running server was started before the card was added.</div>'; return; }
+  if (!was) loadEval();
+  const p = s.procs.inference, c = EV.current, lv = EV.live || {};
+  $('ev-track').innerHTML = !p.running ? '' : !lv.fresh ? 'Cube tracking: starting…'
+    : 'Cube tracking: ' + (lv.problem ? `<span class="tag-warn">${esc(lv.problem)}</span>` : `${esc(lv.colour)} cube ${lv.cube ? 'seen' : 'not seen right now'}${lv.at_surface ? ', at its surface' : ''}`)
+      + (EV.state === 'running' ? '.' : `. Placements counted since the launch started: ${lv.placed.length} (try it: put the cube on its surface by hand).`) + ' The Live view shows the floor outline, the cube and its path.';
+  $('ev-info').innerHTML = `Every policy run is evaluated by itself: from <b>Start policy</b> to <b>Stop policy</b> in card 4. Evaluated are live runs only, not previews. The cubes placed on the surface of their colour are counted from the workspace camera while the policy runs; the Live view shows what the count sees. Both camera views and the arm and hand signals are saved in <code>${esc(EV.folder)}</code>.`;
+  let state = 'No policy running', cls = 'idle', sub = '', timer = '', pl = ['Idle', ''];
+  if (EV.state === 'running') {
+    state = 'Evaluating'; cls = 'rec'; pl = ['Evaluating', 'bad busy'];
+    timer = mmss(c.elapsed) + (lv.fresh ? ` · ${lv.placed.length} placed` : '');
+    sub = `${evShort(c)} · until the policy is stopped in card 4.`;
+  } else if (EV.state === 'starting') { state = 'Starting the policy…'; cls = 'warn'; pl = ['Starting…', 'warn busy']; }
+  else if (EV.state === 'saving') { state = 'Saving the run…'; cls = 'warn'; sub = 'Finishing the videos and writing the signals.'; pl = ['Saving…', 'warn busy']; }
+  else if (!p.running) sub = 'Start the policy launch live in card 4, then press Start policy there.';
+  else if (!p.node_ready) sub = 'The policy is still loading.';
+  else if (p.preview) sub = 'The policy launch runs in preview: nothing moves, so the run is not evaluated.';
+  else { sub = `Loaded: ${evShort(p)}. The evaluation starts with Start policy in card 4.`; pl = ['Ready', 'ok']; }
+  pill($('ev-pill'), pl[0], pl[1]);
+  $('ev-state').textContent = state; $('ev-state').className = 'op-state ' + cls; $('ev-timer').textContent = timer; $('ev-sub').innerHTML = sub;
+  let notes = '';
+  if (EV.message) notes += `<div class="note warn">${esc(EV.message)}</div>`;
+  $('ev-notes').innerHTML = notes;
+  if (EV.last_id && EV.last_id !== evLast) { const first = evLast === null && !renderEval.sawBusy; evLast = EV.last_id; if (!first) evSel = EV.last_id; loadEval(); }
+  if (EV.state !== 'idle') renderEval.sawBusy = true;
+}
+setInterval(() => { if (!document.hidden && evHave) loadEval(); }, 5000);
 
 /* ---------- status ---------- */
 const NUC = {
@@ -951,15 +1156,20 @@ function renderExtras(s) {
   const cams = ck.cameras || {};
   $('live-note').textContent = (cams.front_view || cams.wrist_view) ? '' : 'Cameras are off: they run with the station launch (section 2) or a policy launch (section 4).';
   const jr = s.procs.job;
-  pill($('job-pill'), jr.running ? (jr.stopping ? 'Stopping…' : (s.job_dataset === 'upload' ? 'Uploading…' : `Processing ${s.job_dataset || ''}…`)) : (jr.exit_code != null && jr.exit_code !== 0 ? 'Last run had errors' : 'Idle'), jr.running ? 'warn busy' : (jr.exit_code != null && jr.exit_code !== 0 ? 'bad' : ''));
-  $('ds-process').disabled = jr.running || !$('ds-select').value || o.rec === 'recording' || o.rec === 'saving';
+  pill($('job-pill'), jr.running ? (jr.stopping ? 'Stopping…' : (s.job_dataset === 'upload' ? 'Uploading…' : s.job_dataset === 'eval upload' ? 'Uploading evaluated runs…' : String(s.job_dataset || '').startsWith('clear ') ? `Clearing ${s.job_dataset.slice(6)}…` : `Processing ${s.job_dataset || ''}…`)) : (jr.exit_code != null && jr.exit_code !== 0 ? 'Last run had errors' : 'Idle'), jr.running ? 'warn busy' : (jr.exit_code != null && jr.exit_code !== 0 ? 'bad' : ''));
+  $('ds-process').disabled = jr.running || !$('ds-select').value;
+  JOB_RUNNING = jr.running;
+  const dSel = DS && DS.find(x => x.name === $('ds-select').value);
+  $('ds-clear').disabled = !ARCHIVE_HOST_SET || !dSel || !dSel.clearable || jr.running || ['recording', 'saving', 'review'].includes(o.rec);
   const ft = s.features || [];
   $('lb-note').innerHTML = ft.includes('orientation') ? '' : `<div class="note warn" style="margin-top:8px">Restart APE to store ${ft.includes('description') ? 'the cube orientation' : ft.includes('meta') ? 'the cube orientation and the description' : 'the lighting label, the cube orientation, the description and the settings file of each demo'}. Until then it is not saved.</div>`;
   showPreview();
-  $('ds-upload').disabled = jr.running || o.rec === 'recording' || o.rec === 'saving';
+  $('ds-upload').disabled = jr.running;
   $('ds-upload').title = s.hf_repo ? `Uploads to ${s.hf_repo}: raw and processed recordings that are not there yet, manifest.csv and the dataset version lists` : $('ds-upload').title;
   $('job-stop').disabled = !jr.running || jr.stopping;
-  if (renderExtras.jobWas && !jr.running) loadDatasets();
+  if (renderExtras.jobWas && !jr.running) { loadDatasets(); loadEval(); }
+  evUploading = jr.running && s.job_dataset === 'eval upload';
+  if (evHave) renderUpload();
   renderExtras.jobWas = jr.running;
   const cal = s.calibration || {};
   $('calib-info').textContent = cal.exists ? `Hand calibration file last written ${new Date(cal.written * 1000).toLocaleString()}.` : 'No hand calibration file: the hand will calibrate itself at the next launch start.';
@@ -976,6 +1186,7 @@ function renderExtras(s) {
 function render(s) {
   $('offline').style.display = 'none';
   renderOperate(s); renderExtras(s);
+  try { renderEval(s); delete document.body.dataset.evalError; } catch (e) { console.error('test card', e); document.body.dataset.evalError = String(e && e.stack || e).slice(0, 300); }
   try { renderPolicy(s); delete document.body.dataset.policyError; } catch (e) { console.error('policy card', e); document.body.dataset.policyError = String(e && e.stack || e).slice(0, 300); }   // a fault here must not stop the rest of the page
   /* NUC */
   const n = s.procs.nuc, [nt, nc, nh] = NUC[n.state] || NUC.disconnected;

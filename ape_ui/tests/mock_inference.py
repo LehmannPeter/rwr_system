@@ -1,7 +1,8 @@
 """Stand-in for `ros2 launch experiments run_policy_inference.launch.py` when testing APE without
 the robot (test ROS domain only). Takes the launch's own arguments (preview:=true|false, ...),
 answers /model_inference_command and prints the log lines the real inference node prints.
-Env: MOCK_LOAD_S = seconds the "policy" takes to load, MOCK_PAUSE = 1 prints a pause warning."""
+Env: MOCK_LOAD_S = seconds the "policy" takes to load, MOCK_PAUSE = 1 prints a pause warning,
+MOCK_PREDICT_MS = the prediction time it reports on /policy_inference/timing."""
 import os, sys, time
 import rclpy
 from geometry_msgs.msg import PoseStamped
@@ -18,6 +19,7 @@ rclpy.init(); n = rclpy.create_node("policy_publisher")
 st = {"on": False, "init_until": None, "steps": 0}
 out_arm = n.create_publisher(PoseStamped, "/policy_inference/actions_arm", 10)
 out_hand = n.create_publisher(Float32MultiArray, "/policy_inference/actions_hand", 10)
+out_timing = n.create_publisher(Float32MultiArray, "/policy_inference/timing", 10)
 ctl_arm = None if preview else n.create_publisher(PoseStamped, "/right/arm/end_effector_pose_cmd", 1)
 ctl_hand = None if preview else n.create_publisher(Float32MultiArray, "/right/hand/policy_output", 1)
 say = lambda level, text: print(f"[model_inference_node.py-1] [{level}] [{time.time():.3f}] [policy_publisher]: {text}", flush=True)
@@ -44,6 +46,9 @@ def step():
     a = PoseStamped(); a.header.frame_id = "world"; a.pose.position.x, a.pose.position.y, a.pose.position.z = 0.42, 0.01, 0.31; a.pose.orientation.w = 1.0
     h = Float32MultiArray(data=[0.2] * 17)
     out_arm.publish(a); out_hand.publish(h)
+    ran = st["steps"] % 5 == 1   # as with update_every: 5. MOCK_PREDICT_MS = time of a prediction (default 60)
+    ms = float(os.environ.get("MOCK_PREDICT_MS", "60")) if ran else 1.0
+    out_timing.publish(Float32MultiArray(data=[ms, ms + 40.0, 200.0, float(ran), float(ms + 40.0 <= 200.0)]))
     if ctl_arm: ctl_arm.publish(a); ctl_hand.publish(h)
 
 n.create_subscription(String, "/model_inference_command", command, 10)

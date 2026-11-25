@@ -36,8 +36,10 @@ sys_path_added = str(HERE)
 import sys
 if sys_path_added not in sys.path:
     sys.path.insert(0, sys_path_added)
-from station_data import CAMERAS, DataError, Station, rotate_for_display, safe
+from station_data import CAMERAS, DataError, Station, archive_settings, rotate_for_display, safe
 from policy_checks import Policies, PolicyError
+from eval_trials import EvalError, EvalTrials, LiveTracker
+import eval_upload
 WORKSPACE = Path(os.environ.get("RWR_WS", Path.home() / "rwr_humble_ws"))
 DATA = WORKSPACE / "data"  # raw/<session>/, processed/<session>_10hz/, datasets/<version>/, manifest.csv
 RAW = DATA / "raw"
@@ -47,6 +49,16 @@ POLICIES = Path(os.environ.get("APE_POLICY_DIR", WORKSPACE / "policies"))
 policies = Policies(WORKSPACE, DATA, POLICIES, station.hand_cfg_dir)
 INFERENCE_LOGS = WORKSPACE / "inference_logs"  # written by the inference node, relative to the launch directory
 POLICY_COMMAND_TOPIC = "/model_inference_command"
+# Evaluation of policy runs: one folder per run with the videos, the signals and trial.json (eval_trials.py)
+evals = EvalTrials(DATA / "eval", CAMERAS, previews=WORKSPACE / "work" / "eval_previews")
+try:   # runs saved in the old flat layout move into <policy run>/<checkpoint>/<run id>/ (renames only)
+    _moved, _problems = evals.migrate()
+    if _moved or _problems:
+        print(f"Evaluated runs: {len(_moved)} moved into the folders of their policy and checkpoint."
+              + ("".join("\n  " + p for p in _problems)), flush=True)
+except Exception as exc:
+    print(f"Evaluated runs: the old folder layout could not be moved: {type(exc).__name__}: {exc}", flush=True)
+live = LiveTracker(CAMERAS[0])   # counts placed cubes from the workspace camera while a policy launch runs
 
 ROS_ENV = {"ROS_DOMAIN_ID": os.environ.get("APE_ROS_DOMAIN_ID", "7"), "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp"}
 SIDE = "right"
@@ -372,6 +384,29 @@ class ControlError(Exception):
     pass
 
 
+def summarise_timing(samples, now, window=10.0, since=None):
+    """samples: (arrival time, step ms, oldest observation ms, allowed ms, model ran, published) per policy step.
+    A step in which the model ran is a "prediction"; the others read the stored plan and take almost no time."""
+    recent = [s for s in samples if now - s[0] <= window]
+    if not recent:
+        return None
+    runs = [s for s in recent if s[4]] or recent
+    times = sorted(s[1] for s in runs)
+    session = [s for s in samples if since is None or s[0] >= since]
+    return {
+        "limit_ms": round(recent[-1][3]),
+        "predict_ms": round(times[len(times) // 2]),          # typical time of one prediction
+        "predict_max_ms": round(times[-1]),
+        "age_max_ms": round(max(s[2] for s in runs)),         # oldest reading when a prediction was finished: this is what the limit applies to
+        "predictions": len(runs),
+        "steps": len(recent),
+        "dropped": sum(1 for s in recent if not s[5]),
+        "dropped_total": sum(1 for s in session if not s[5]),
+        "predict_max_total_ms": round(max((s[1] for s in session if s[4]), default=0)),
+        "age": round(now - recent[-1][0], 1),
+    }
+
+
 class InferenceProc(PtyProcess):
     """The policy inference launch. The inference node does not report its state on a topic,
     so what it is doing is read from its log."""
@@ -396,6 +431,7 @@ class InferenceProc(PtyProcess):
         self._rest = ""
         self._seen_none = False    # no listener of a previous launch is left on the command topic
         self._init_asked = None    # when APE asked for the move to the center pose, until the node confirms it
+        self.log_file = None       # the inference node's own log of the current policy start
 
     def begin(self, argv, run, ckpt, preview, arm_init, init_pose=None):
         if self.running:
@@ -409,6 +445,8 @@ class InferenceProc(PtyProcess):
         lines = (self._rest + ANSI.sub("", data.decode(errors="replace")).replace("\r", "")).split("\n")
         self._rest = lines.pop()[-2000:]
         for line in lines:
+            if "Started new log file:" in line:
+                self.log_file = line.split("Started new log file:", 1)[1].strip()
             if "Policy started." in line:
                 self.policy_on, self.policy_since, self.pauses, self.last_pause, self.slow, self.note = True, time.time(), 0, None, 0, ""
             elif "Policy stopped." in line:
@@ -459,6 +497,7 @@ class InferenceProc(PtyProcess):
             last_pause={"age": time.time() - self.last_pause[0], "text": self.last_pause[1]} if self.last_pause else None,
             node_ready=self.node_ready(),
             producing=bool(monitor and monitor.policy_running),
+            timing=monitor.policy_timing(since=self.policy_since) if monitor and self.policy_on and self.running else None,
         )
         return d
 
@@ -499,6 +538,7 @@ class RosMonitor:
         self.tele = {}       # latest values per stream, for the live panels
         self.stamps = {}     # stream name -> recent arrival times, for the rates
         self.frames = {}     # camera name -> (arrival time, latest Image message)
+        self.timing = []     # policy steps: (arrival time, step ms, oldest observation ms, allowed ms, model ran, published)
         self.move_until = 0.0  # a smooth move started from this page is in progress until then
         self.move_what = ""
         self._clients = {}
@@ -558,6 +598,11 @@ class RosMonitor:
                     "last_motion_errors": active(msg.last_motion_errors),
                 }
                 self.robot_stamp = time.time()
+                if evals.rec is not None:
+                    fr = self.tele["franka"]
+                    evals.feed("franka_q", fr["q"]), evals.feed("franka_dq", fr["dq"]), evals.feed("franka_tau", fr["tau"])
+                    evals.feed("franka_tau_ext", fr["tau_ext"]), evals.feed("franka_wrench", fr["wrench"])
+                    evals.feed("robot_mode", [int(msg.robot_mode)])
 
             def pose7(msg):
                 p, o = msg.pose.position, msg.pose.orientation
@@ -567,22 +612,28 @@ class RosMonitor:
                 def cb(msg):
                     mark(name)
                     self.tele[name] = [round(float(v), digits) for v in msg.data]
+                    evals.feed(name, self.tele[name])
                 return cb
 
             def on_cmd(msg):
                 self._cmd_times.append(time.time())
                 mark("arm_cmd")
                 self.tele["arm_cmd"] = pose7(msg)
+                evals.feed("arm_cmd", self.tele["arm_cmd"])
 
             def on_hand_cmd(msg):
                 self._hand_times.append(time.time())
                 mark("hand_cmd")
                 self.tele["hand_cmd"] = [round(float(v), 4) for v in msg.data]
+                evals.feed("hand_cmd", self.tele["hand_cmd"])
 
             def on_image(cam):
                 def cb(msg):
                     mark(cam)
                     self.frames[cam] = (time.time(), msg)
+                    evals.feed_frame(cam, msg)
+                    if cam == live.cam:
+                        live.feed(msg)
                 return cb
 
             def on_glove(msg):
@@ -624,6 +675,7 @@ class RosMonitor:
                 self.arm_stamp = time.time()
                 mark("arm_pose")
                 self.tele["arm"] = pose7(msg)
+                evals.feed("arm", self.tele["arm"])
 
             node.create_subscription(PoseStamped, f"/{SIDE}/arm/end_effector_pose", on_arm, 5)
             node.create_subscription(Float32MultiArray, f"/{SIDE}/hand/policy_output", on_hand_cmd, 50)
@@ -634,9 +686,17 @@ class RosMonitor:
             def on_policy_arm(msg):   # what the policy outputs; in preview it goes nowhere else
                 mark("policy_arm")
                 self.tele["policy_arm"] = pose7(msg)
+                evals.feed("policy_arm", self.tele["policy_arm"])
 
             node.create_subscription(PoseStamped, "/policy_inference/actions_arm", on_policy_arm, 10)
             node.create_subscription(Float32MultiArray, "/policy_inference/actions_hand", floats("policy_hand", 4), 10)
+
+            def on_policy_timing(msg):   # one per policy step, from the inference node
+                if len(msg.data) >= 5:
+                    self.timing = (self.timing + [(time.time(), *[float(v) for v in msg.data[:5]])])[-3000:]
+                    evals.feed("policy_timing", [float(v) for v in msg.data[:5]])
+
+            node.create_subscription(Float32MultiArray, "/policy_inference/timing", on_policy_timing, 50)
             self._String = String
             self._policy_pub = node.create_publisher(String, POLICY_COMMAND_TOPIC, 10)
             from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -690,8 +750,8 @@ class RosMonitor:
             "franka": get("franka", "arm_state"),
         }
 
-    def jpeg(self, cam, width=960):
-        """Latest frame of a camera as JPEG bytes, or None if there is no recent frame."""
+    def jpeg(self, cam, width=960, draw=None):
+        """Latest frame of a camera as JPEG bytes, or None if there is no recent frame. draw(image) may paint onto it."""
         import cv2
         import numpy as np
 
@@ -706,6 +766,9 @@ class RosMonitor:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         if img.shape[1] > width:
             img = cv2.resize(img, (width, int(round(img.shape[0] * width / img.shape[1]))), interpolation=cv2.INTER_AREA)
+        if draw is not None:
+            img = img.copy()   # the message's own pixels must stay as they are
+            draw(img)
         img = rotate_for_display(cam, img)  # display only: the recorded data is not turned
         ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
         return buf.tobytes() if ok else None
@@ -741,6 +804,11 @@ class RosMonitor:
         msg.data = text
         self._policy_pub.publish(msg)
 
+    def policy_timing(self, window=10.0, since=None):
+        """How long the policy's steps took over the last `window` seconds, and since `since` (when the policy was started).
+        None while no step was reported, e.g. with an inference node from before the timing topic existed."""
+        return summarise_timing(self.timing, time.time(), window, since)
+
     def policy_listeners(self):
         """Nodes listening for policy commands: the inference node does once its policy is loaded."""
         return self._policy_pub.get_subscription_count() if self._policy_pub is not None else 0
@@ -754,7 +822,7 @@ class RosMonitor:
     @property
     def commands_flowing(self):
         """True while arm commands are really being sent (teleop running, or a smooth move)."""
-        return len([t for t in self._cmd_times if time.time() - t < 0.5]) >= 5
+        return len([t for t in self._cmd_times if time.time() - t < 0.5]) >= 3   # >= 6 Hz: the policy sends exactly 10 Hz, so a 10 Hz cut-off flickered
 
     @property
     def moving(self):
@@ -767,7 +835,7 @@ class RosMonitor:
 
     @property
     def hand_following(self):
-        return len([t for t in self._hand_times if time.time() - t < 0.5]) >= 5
+        return len([t for t in self._hand_times if time.time() - t < 0.5]) >= 3   # >= 6 Hz, see commands_flowing
 
     def info(self):
         age = time.time() - self.robot_stamp if self.robot_stamp else None
@@ -925,6 +993,8 @@ class Operate:
             raise ControlError("The logger is not running, so nothing can be recorded.")
         if monitor.moving:
             raise ControlError("The arm is still moving to a pose. Wait, or stop the move first.")
+        if mover.running and not (teleop.running or recording.running):
+            raise ControlError("Start the station launch first (section 2). Only the arm mover for Move to center is running.")
         robot = monitor.info()["robot"]
         notes = []
         if monitor.ready("resume") and not robot:
@@ -988,6 +1058,10 @@ class Operate:
         return ""
 
     def _move(self, key, what, target, goal_quat=None):
+        if inference.running and (inference.policy_on or inference.init == "moving"):
+            raise ControlError("The policy drives the arm. Stop the policy first.")
+        if monitor.moving:   # by the clock, so it holds before the first targets have arrived here
+            raise ControlError("A move is already running.")
         if monitor.commands_flowing:
             raise ControlError("A move is already running." if monitor.moving else "Pause teleop first.")
         robot = monitor.info()["robot"]
@@ -998,9 +1072,14 @@ class Operate:
             raise ControlError("The arm position is unknown.")
         if dist > MAX_MOVE_M:
             raise ControlError(f"The {what} is {dist * 100:.0f} cm away, more than the {MAX_MOVE_M * 100:.0f} cm limit. Bring the arm closer first.")
+        started = _ensure_mover(key)
         self.relax_after_start = False
         self._torque(True)   # keep the fingers from flopping while the arm moves
         ok, msg = monitor.call(key)
+        end = time.time() + 5.0
+        while not ok and started and time.time() < end:   # a fresh mover needs a moment to read the arm pose
+            time.sleep(0.3)
+            ok, msg = monitor.call(key)
         if not ok:
             self._torque(False)
             raise ControlError(msg or "The teleop node refused: it has no robot pose yet, or teleop is running.")
@@ -1261,14 +1340,22 @@ nuc = NucSession()
 teleop = PtyProcess("teleop")
 recording = PtyProcess("recording")
 job = PtyProcess("job")  # processing and checking recorded demos
+# Processing and uploads run at the lowest CPU priority (inherited by every child), so they can run during a
+# recording: teleop, cameras and the logger always get the CPU first. ionice is not used: the NVMe disk has no
+# I/O scheduler ("none"), so it would do nothing. Uploads go out over wifi/VPN, not the robot's wired link.
+BACKGROUND = ["nice", "-n", "19"]
 job.dataset = None
 inference = InferenceProc()
-PROCS = {"nuc": nuc, "teleop": teleop, "recording": recording, "job": job, "inference": inference}
+# The arm teleop node on its own, so Move to center works without the station launch. Paused it publishes
+# nothing; it only sends arm targets during a move. Stopped before a station launch, which brings its own.
+mover = PtyProcess("mover")
+PROCS = {"nuc": nuc, "teleop": teleop, "recording": recording, "job": job, "inference": inference, "mover": mover}
 monitor = None
 
 
 def cleanup():
     """Ctrl-C everything this page started and give it time to exit cleanly."""
+    live.stop()
     for p in (teleop, recording, inference, job):
         p.stop(grace=10)
     if nuc.state in ("launching", "running"):
@@ -1290,7 +1377,9 @@ async def lifespan(app):
     monitor = RosMonitor()
     threading.Thread(target=operate.supervise, daemon=True).start()
     threading.Thread(target=policy_watch, daemon=True).start()
+    threading.Thread(target=eval_watch, daemon=True).start()
     yield
+    mover.stop(grace=3.0)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -1318,13 +1407,52 @@ def status():
         "disk_free_gb": round(usage.free / 1e9, 1),
         "datasets_dir": str(RAW),
         "hf_repo": station.hf_repo(),
-        "features": ["lighting", "meta", "description", "orientation", "inference"],
+        "features": ["lighting", "meta", "description", "orientation", "inference", "timing", "eval", "mover", "eval_upload"],
+        "eval": {**evals.info(), "live": live.info()},
         "time": time.time(),
     }
 
 
 def hand_only_launch():
     return recording.running and getattr(recording, "mode", None) == "hand_only"
+
+
+def _ensure_mover(key):
+    """Make sure a node answers the move service. Without the station launch, start the arm teleop node on its own.
+    Returns True if it was started just now."""
+    if monitor.ready(key):
+        return False
+    if teleop.running or recording.running:
+        raise ControlError("The station launch is running, but its arm teleop node does not answer. Check its Log.")
+    own = {p.pid for p in PROCS.values() if p.pid}
+    if any(e in ("teleop", "recording") for e in external_launches(own)):
+        raise ControlError("A station launch runs in a terminal outside this page, and its arm teleop node does not answer.")
+    if not mover.running:
+        mover.start(ros2_cmd("run", "experiments", "run_teleop_rokoko.py", "--ros-args", "-r", "__node:=ape_arm_mover",
+                             "-p", "interactive:=false", "-p", "enable_left:=false", "-p", "enable_right:=true"),
+                    cwd=WORKSPACE, env=ROS_ENV)
+    end = time.time() + 25.0
+    while time.time() < end and not monitor.ready(key):
+        if not mover.running:
+            raise ControlError(f"The arm mover stopped (exit code {mover.exit_code}). See the APE terminal.")
+        time.sleep(0.3)
+    if not monitor.ready(key):
+        raise ControlError("The arm mover did not start within 25 s.")
+    return True
+
+
+def _stop_mover():
+    """Before a station launch: it starts its own arm teleop node with the same services."""
+    if not mover.running:
+        return
+    if monitor and monitor.moving:
+        raise HTTPException(409, "The arm is still moving to the center pose. Wait, or stop the move first.")
+    mover.stop(grace=5.0)
+    end = time.time() + 15.0
+    while mover.running and time.time() < end:
+        time.sleep(0.2)
+    if mover.running:
+        raise HTTPException(409, "The arm mover for Move to center did not stop. Try again.")
 
 
 def _launch_guard():
@@ -1376,12 +1504,15 @@ def _relax_after_policy():
 
 
 def policy_command(action, override=False):
-    """Start, stop or reset the loaded policy, or move the arm to the center pose."""
+    """Start, stop or reset the loaded policy, or move the arm to the center pose.
+    Every live start is recorded as an evaluation run (card 5) until the policy stops."""
     if action not in ("start", "stop", "reset", "init_arm"):
         raise ControlError("Unknown policy command.")
     if not inference.running:
         raise ControlError("Start the policy launch first.")
     if action == "stop":   # always allowed; it also ends a move to the center pose
+        if evals.state == "running" and not evals.current["end_reason"]:
+            evals.current["end_reason"] = "operator"   # the evaluation of this run ends with it
         monitor.policy_command("stop")
         if not inference.preview:
             threading.Thread(target=_relax_after_policy, daemon=True).start()
@@ -1390,6 +1521,8 @@ def policy_command(action, override=False):
         raise ControlError("The policy is still loading. Wait until the card says it is ready.")
     if inference.init == "moving":
         raise ControlError("The arm is still moving to the center pose. Wait, or press Stop policy.")
+    if monitor.moving:
+        raise ControlError("The arm is still moving to a pose. Wait, or stop the move first.")
     if inference.policy_on:
         raise ControlError("The policy is already running." if action == "start" else "Stop the policy first.")
     if action == "reset":
@@ -1430,7 +1563,16 @@ def policy_command(action, override=False):
             raise ControlError("Not started, because a check failed: " + "; ".join(failed) + ". Fix it, or confirm in the page that you want to run anyway.")
         operate.relax_after_start = False
         note = operate._torque(True)   # the fingers need power to follow the policy
-    monitor.policy_command("start")
+    if not inference.preview:   # a preview moves nothing, so there is nothing to evaluate
+        try:   # recording begins before the policy does, so the first moment is in it; it never keeps the policy from starting
+            evals.begin(_eval_meta(_failed(result)))
+        except Exception as exc:
+            note = (note + " " if note else "") + f"This run is not being evaluated: {exc}"
+    try:
+        monitor.policy_command("start")
+    except Exception:
+        evals.cancel()
+        raise
     return note
 
 
@@ -1531,10 +1673,139 @@ async def inference_cmd(action: str, request: Request):
     return {"note": note or "", "inference": inference.info()}
 
 
+# -- evaluation of policy runs -----------------------------------------------------------
+def _git_commit():
+    try:
+        out = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=3).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(HERE), "status", "--porcelain", "-uno"], capture_output=True, text=True, timeout=3).stdout.strip()
+        return out + (" + uncommitted changes" if out and dirty else "")
+    except Exception:
+        return ""
+
+
+def _eval_meta(failed=()):
+    """What is stored with an evaluated run besides the recording: the policy and the station."""
+    info = next((r for r in policies.list_runs() if r["name"] == inference.run), {})
+    return {
+        "run": inference.run, "ckpt": inference.ckpt, "algo": info.get("algo", ""), "dataset": info.get("dataset", ""),
+        "note": "", "failed_checks": list(failed), "rwr_system_commit": _git_commit(),
+        "station": {"end_effector_parameters": getattr(monitor, "ee_params", None), "calibration": station.calibration(),
+                    "center_yaw_deg": operate.center_yaw(), "hand_temp_start": monitor.tele.get("hand_temp") if monitor else None},
+    }
+
+
+def eval_watch():
+    """Background loop: an evaluation follows the policy. Its clock starts when the policy starts and it is saved when the
+    policy has stopped, whatever stopped it. A policy started outside this page (ros2 topic pub) is picked up as well."""
+    seen = None   # start time of the last policy run that was picked up
+    while True:
+        time.sleep(0.1)
+        try:
+            if monitor is None:
+                continue
+            now, tr = time.time(), evals.current
+            if inference.running and not live.running:   # the live count runs with the policy launch, also before the policy starts and in preview
+                live.start()
+            elif not inference.running and live.proc is not None:
+                live.stop()
+            on = inference.running and inference.policy_on and inference.policy_since and not inference.preview
+            if evals.state == "idle":
+                if on and inference.policy_since != seen:   # not started through this page: the first moment is missing
+                    seen = inference.policy_since
+                    evals.begin(dict(_eval_meta(), started_outside_page=True))
+                    evals.started(inference.policy_since, inference_log=inference.log_file)
+                    live.reset(inference.policy_since)
+            elif evals.state == "starting":
+                if on and inference.policy_since >= tr["asked"] - 0.5:
+                    seen = inference.policy_since
+                    evals.started(inference.policy_since, inference_log=inference.log_file)
+                    live.reset(inference.policy_since)
+                elif now - tr["asked"] > 6.0:
+                    evals.cancel("The run was not recorded: the inference node did not start the policy. See the Log in card 4.")
+            elif evals.state == "running" and not on:
+                robot = monitor.info()["robot"]
+                reason = "launch_stopped" if not inference.running else "robot" if inference.note else "stopped"
+                evals.finish(reason, {
+                    "robot_mode_at_end": robot["mode"] if robot else None, "stop_note": inference.note,
+                    "timing": monitor.policy_timing(window=now - tr["t0"] + 5.0, since=tr["t0"]),
+                    "policy_pauses": inference.pauses, "policy_slow_steps": inference.slow, "policy_problems": list(inference.problems),
+                    "hand_temp_end": monitor.tele.get("hand_temp"), "live": live.result(),
+                })
+        except Exception as exc:
+            evals.message = f"Evaluation error: {type(exc).__name__}: {exc}"
+
+
+def _draw_tracking(img):
+    """Paint what the live count sees onto a workspace camera image (BGR): the floor's outline, the cube and its path."""
+    import cv2
+    import numpy as np
+
+    st = live.info()
+    if not st["fresh"] or not st["size"]:
+        return
+    k = img.shape[1] / st["size"][0]
+    scaled = lambda pts: [np.round(np.array(pts, dtype=float) * k).astype(np.int32)]
+    if st["hull"]:
+        cv2.polylines(img, scaled(st["hull"]), True, (255, 255, 255), 1, cv2.LINE_AA)
+    trail = [p for p in st["trail"] if p]
+    if len(trail) > 1:
+        cv2.polylines(img, scaled(trail), False, (255, 255, 0), 2, cv2.LINE_AA)
+    if st["cube"]:
+        x, y, area = st["cube"]
+        centre, radius = (int(round(x * k)), int(round(y * k))), int(round((area / 3.1416) ** 0.5 * k)) + 6
+        cv2.circle(img, centre, radius, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.circle(img, centre, radius, (0, 255, 0) if st["at_surface"] else (255, 255, 0), 2, cv2.LINE_AA)   # green while it is at its surface
+    text = st["problem"] or f"cube: {st['colour']}{'' if st['cube'] else ' (not seen)'}   placed: {len(st['placed'])}"
+    for colour, thick in (((0, 0, 0), 4), ((255, 255, 255), 1)):
+        cv2.putText(img, text, (10, img.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, thick, cv2.LINE_AA)
+
+
+@app.get("/api/eval")
+def eval_list():
+    trials = evals.trials()
+    up = eval_upload.states(evals.folder, trials)   # is each run on the Training machine?
+    return {"trials": [{**t, "upload": up.get(t["id"], "no")} for t in trials[:60]], "total": len(trials), "folder": str(evals.folder),
+            "upload": {"host_set": bool(archive_settings()["host"]), "uploaded": sum(1 for v in up.values() if v == "uploaded"),
+                       "changed": sum(1 for v in up.values() if v == "changed"), "different": sum(1 for v in up.values() if v == "different"),
+                       "checked_at": eval_upload.read_status(evals.folder).get("checked_at", "")}}
+
+
+@app.post("/api/eval/upload")
+def eval_upload_start():
+    """Copy the evaluated runs to the Training machine and verify them there by checksum (eval_upload.py). Deletes nothing."""
+    if job.running:
+        raise HTTPException(409, "Another processing or upload job is still running (card 3).")
+    if inference.policy_on or evals.busy:
+        raise HTTPException(409, "Stop the policy first: the run being recorded is not complete, and uploading could make the policy stall.")
+    settings = archive_settings()
+    if not settings["host"]:
+        raise HTTPException(400, "No Training machine is set: add archive_host to static/local/station.json.")
+    job.dataset = "eval upload"
+    job.start([*BACKGROUND, *eval_upload.command(DATA, settings, WORKSPACE)], cwd=WORKSPACE)
+    return job.info()
+
+
+@app.post("/api/eval/trial/{trial_id}")
+async def eval_update(trial_id: str, request: Request):
+    try:
+        return evals.update(trial_id, await request.json())
+    except EvalError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.get("/api/eval/trial/{trial_id}/{cam}.mp4")
+def eval_video(trial_id: str, cam: str):
+    try:
+        return FileResponse(evals.video(trial_id, cam), media_type="video/mp4")
+    except EvalError as exc:
+        raise HTTPException(404, str(exc))
+
+
 @app.post("/api/teleop/start")
 async def teleop_start(request: Request):
     body = await request.json()
     _launch_guard()
+    await asyncio.to_thread(_stop_mover)
     args = ["launch", "experiments", "teleop_rokoko.launch.py", "enable_keyboard_runner:=false"]
     if not body.get("hand", True):
         args.append("enable_hand_controller:=false")
@@ -1551,6 +1822,7 @@ async def recording_start(request: Request):
     if not DATASET_NAME.match(name):
         raise HTTPException(400, "Session name: letters, digits, _ and - only, starting with a letter or digit, e.g. s03_2026-11-24_opA.")
     _launch_guard()
+    await asyncio.to_thread(_stop_mover)
     args = [
         "launch", "experiments", "record_demonstration.launch.py",
         f"storage_base_path:={RAW}", f"dataset_name:={name}", "enable_keyboard_runner:=false",
@@ -1568,6 +1840,7 @@ def hand_only_start():
     """Gloves, retargeter and ORCA hand without the arm: no arm teleop, cameras or logger.
     It runs in the station launch's slot, so the same Stop button, Log and guards apply."""
     _launch_guard()
+    _stop_mover()
     recording.hand, recording.mode = True, "hand_only"
     recording.start(ros2_cmd("launch", "experiments", "teleop_rokoko.launch.py", "teleop_arm:=false", "enable_keyboard_runner:=false"),
                     cwd=WORKSPACE, env=ROS_ENV)
@@ -1626,7 +1899,7 @@ async def live_stream(request: Request):
 def camera_frame(cam: str):
     if cam not in CAMERAS or not monitor:
         raise HTTPException(404)
-    data = monitor.jpeg(cam)
+    data = monitor.jpeg(cam, draw=_draw_tracking if cam == live.cam else None)
     if data is None:
         raise HTTPException(503, "No recent frame")
     return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
@@ -1651,24 +1924,42 @@ def hand_recalibrate():
 
 @app.get("/api/datasets")
 def datasets():
-    return {"datasets": station.list_datasets(), "job_running": job.running, "job_dataset": job.dataset}
+    return {"datasets": station.list_datasets(), "job_running": job.running, "job_dataset": job.dataset,
+            "archive_host_set": bool(archive_settings()["host"]), "archive_require_hf": archive_settings()["require_hf_backup"]}
 
 
 @app.post("/api/datasets/{dataset}/process")
 def dataset_process(dataset: str):
     if job.running:
         raise HTTPException(409, "Another processing job is still running.")
-    if inference.policy_on:
+    if inference.policy_on or evals.busy:
         raise HTTPException(409, "Stop the policy first: processing is heavy and would make the policy stall.")
-    if operate.rec in ("recording", "saving"):
-        raise HTTPException(409, "Wait until the current demo is recorded and saved: processing is heavy and could disturb the recording.")
     try:
         script, prev = station.process_command(dataset)
     except DataError as exc:
         raise HTTPException(400, str(exc))
     prev.mkdir(parents=True, exist_ok=True)
     job.dataset = dataset
-    job.start(["bash", "-c", script], cwd=WORKSPACE, env=ROS_ENV)
+    job.start([*BACKGROUND, "bash", "-c", script], cwd=WORKSPACE, env=ROS_ENV)
+    return job.info()
+
+
+@app.post("/api/datasets/{dataset}/clear")
+def dataset_clear(dataset: str):
+    """Delete the local raw, processed and archive files of the demos whose files all match on the Training
+    machine. archive_job.py compares the checksums again right before deleting."""
+    if job.running:
+        raise HTTPException(409, "Another job is still running.")
+    if inference.policy_on:
+        raise HTTPException(409, "Stop the policy first.")
+    if operate.rec in ("recording", "saving", "review"):
+        raise HTTPException(409, "Save or discard the current demo first.")
+    try:
+        cmd = station.clear_command(dataset)
+    except DataError as exc:
+        raise HTTPException(400, str(exc))
+    job.dataset = "clear " + dataset
+    job.start(cmd, cwd=WORKSPACE)
     return job.info()
 
 
@@ -1679,12 +1970,10 @@ def upload_start():
         raise HTTPException(409, "Another processing or upload job is still running.")
     if inference.policy_on:
         raise HTTPException(409, "Stop the policy first: uploading could make the policy stall.")
-    if operate.rec in ("recording", "saving"):
-        raise HTTPException(409, "Wait until the current demo is recorded and saved: uploading could disturb the recording.")
     if not station.hf_repo():
         raise HTTPException(400, "No Hugging Face repo is set yet. Run once in a terminal: python " + str(station.tool) + " push --repo <user>/<name>")
     job.dataset = "upload"
-    job.start(station.upload_command(), cwd=WORKSPACE)
+    job.start([*BACKGROUND, *station.upload_command()], cwd=WORKSPACE)
     return job.info()
 
 

@@ -50,6 +50,7 @@ def run():
         print("start twice ->", api("/api/inference/cmd/start").get("ERR"))
         print("processing while the policy runs ->", api("/api/datasets/no_such_session/process").get("ERR"))
         time.sleep(1.5); i = inf(); print("pauses:", i["pauses"], "| last:", i["last_pause"] and i["last_pause"]["text"])
+        print("timing:", i["timing"])   # with the mock: predict_ms 60, age_max_ms 100, limit_ms 200, dropped 0
         print("stop policy:", api("/api/inference/cmd/stop").get("ERR", "accepted"), "| policy_on:", not wait(lambda: not inf()["policy_on"]), "| producing:", not wait(lambda: not inf()["producing"]))
         c2 = api("/api/policies/check?" + q, post=False); print("previewed check:", next(i for i in c2["items"] if i["id"] == "preview")["status"], "|", api("/api/policies", post=False)["runs"][0]["checkpoints"][0]["previewed"])
         print("stop launch:", api("/api/inference/stop")["stopping"], "| stopped:", wait(lambda: not inf()["running"], 25), "| exit", inf()["exit_code"])

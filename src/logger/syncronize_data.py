@@ -4,23 +4,15 @@ import os
 import glob
 import argparse
 from scipy.spatial.transform import Rotation as R, Slerp
-from ament_index_python.packages import get_package_share_directory
 from scipy.interpolate import interp1d
 import numpy as np
 import h5py
 import cv2
-from std_msgs.msg import Float32MultiArray, String
-from geometry_msgs.msg import PoseStamped
-from sensor_msgs.msg import Image
 import re
 import yaml
 
-TOPIC_TO_STRING = {
-    Float32MultiArray: "Float32MultiArray",
-    PoseStamped: "PoseStamped",
-    Image: "Image",
-    String: "String",
-}
+# No ROS import at module level: topic types are compared as strings from the logger config, so this
+# script also runs in plain Python (e.g. on the Training machine) when --cfg_file is given.
 
 def get_topic_names(h5_path):
     with h5py.File(h5_path, 'r') as h5_file:
@@ -277,6 +269,8 @@ def main():
     args = parser.parse_args()
 
     if args.cfg_file == "":
+        # Only the default config location needs ROS; pass --cfg_file to run without it.
+        from ament_index_python.packages import get_package_share_directory
         cfg_file = os.path.join(get_package_share_directory("experiments"), "cfgs", "logger", "datacollection_default.yaml")
     else:
         cfg_file = args.cfg_file

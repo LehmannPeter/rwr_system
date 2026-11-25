@@ -121,6 +121,10 @@ class PolicyPlayerAgent(Node):
         # to the observable policy topics cannot pass through to the robot.
         self.action_pubs = {}
         self.control_pubs = {}
+        # One message per policy step, also in preview: [time the step took (ms), age of the oldest
+        # observation when the step was finished (ms), the allowed age (ms), 1 if the model ran in this
+        # step (else the action came from a stored plan), 1 if the action was published]. APE shows it.
+        self.timing_pub = self.create_publisher(Float32MultiArray, "/policy_inference/timing", 10)
         for key, spec in self.actions_cfg.items():
             msg_type = PoseStamped if self._is_arm_key(key) else Float32MultiArray
             self.action_pubs[key] = self.create_publisher(msg_type, f"/policy_inference/{key}", 10)
@@ -466,9 +470,22 @@ class PolicyPlayerAgent(Node):
                 problems.append(f"{key} missing")
                 continue
             age = (now - rclpy.time.Time.from_msg(stamp)).nanoseconds / 1e9
-            if not 0.0 <= age <= self.max_observation_age:
+            # -0.05 s, not 0: the arm state is stamped by the NUC, whose clock runs about 1 ms ahead of this PC's, so a
+            # fresh qpos_arm often has a slightly negative age. With 0 that caused most "Policy output paused" steps.
+            if not -0.05 <= age <= self.max_observation_age:
                 problems.append(f"{key} age {age:.3f} s")
         return problems
+
+    def oldest_observation_age(self, stamp_dict):
+        now = self.get_clock().now()
+        ages = [(now - rclpy.time.Time.from_msg(stamp)).nanoseconds / 1e9 for stamp in stamp_dict.values() if stamp is not None]
+        return max(ages, default=0.0)
+
+    def publish_timing(self, step_s, stamp_dict, model_ran, published):
+        self.timing_pub.publish(Float32MultiArray(data=[
+            step_s * 1e3, self.oldest_observation_age(stamp_dict) * 1e3, self.max_observation_age * 1e3,
+            float(model_ran), float(published),
+        ]))
 
     def discard_actions(self, reason):
         self.policy.reset_policy()
@@ -490,13 +507,18 @@ class PolicyPlayerAgent(Node):
             return
 
         dbg_info = {} if self.logfile_root != "" else None
+        # The model only runs when the policy starts a new plan (every `update_every` steps).
+        model_ran = getattr(self.policy, "_policy_step_cnt", 0) == 0
+        step_started = time.perf_counter()
         # Convert to torch tensors, run policy
         with torch.inference_mode():
             obs_torch = {k: torch.tensor(v).float().unsqueeze(0) for k, v in obs_dict.items()} # add batch dimension
             actions = self.policy.predict_action(obs_torch, dbg_info)
             action_dict = {key: actions[key][0].cpu().numpy() for key in self.actions_cfg}
+        step_s = time.perf_counter() - step_started   # .cpu() above waits for the GPU, so this is the full time
 
         problems = self.observation_problems(stamp_dict)
+        self.publish_timing(step_s, stamp_dict, model_ran, published=not problems)
         if problems:
             self.discard_actions(", ".join(problems))
             return
