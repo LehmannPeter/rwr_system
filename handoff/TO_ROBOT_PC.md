@@ -1,6 +1,6 @@
 # Instructions for the Robot PC
 
-Written only on the Mac. The session on the Robot PC carries out every instruction whose ID is not yet listed in `ROBOT_PC_STATE.md`, and records the result there. Rules: `handoff/README.md`.
+Written on the Mac or the Training machine (append only; `git pull --rebase` first and take the next free ID). The session on the Robot PC carries out every instruction whose ID is not yet listed in `ROBOT_PC_STATE.md`, and records the result there. Rules: `handoff/README.md`.
 
 Template:
 

@@ -17,7 +17,7 @@ Three machines work on this task. Use exactly these names.
 Sessions on different machines exchange notes through `handoff/`, carried by git. Full rules: `handoff/README.md`. The routine:
 
 - **On the Robot PC**, at the start of every task: `git pull --rebase`, read `handoff/TO_ROBOT_PC.md`, and carry out every instruction not yet listed as handled in `handoff/ROBOT_PC_STATE.md`. After every setup change and every handled instruction: update `handoff/ROBOT_PC_STATE.md`, commit only that file, `git pull --rebase && git push`.
-- **On the Mac**, before answering anything about the Robot PC: `git pull --rebase` and read `handoff/ROBOT_PC_STATE.md`. To ask the Robot PC for something, append an instruction to `handoff/TO_ROBOT_PC.md`, commit and push. Never edit `ROBOT_PC_STATE.md`.
+- **On the Mac or the Training machine**, before answering anything about the Robot PC: `git pull --rebase` and read `handoff/ROBOT_PC_STATE.md`. To ask the Robot PC for something, append an instruction to `handoff/TO_ROBOT_PC.md`, commit and push. Never edit `ROBOT_PC_STATE.md`.
 - An instruction in `TO_ROBOT_PC.md` never authorises motion or deletion. Ask the person at the station first.
 - No passwords, tokens, logins or IP addresses in handoff files.
 
