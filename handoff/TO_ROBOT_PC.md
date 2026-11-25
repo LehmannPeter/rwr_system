@@ -87,3 +87,23 @@ Report back in `ROBOT_PC_STATE.md` **on `main`**: this checkout is not on `main`
 - archive size vs raw size, and encoding time per demo;
 - each checklist item: passed / failed (with the log line);
 - anything that was blocked, and why.
+
+## 2026-11-26-01: Evaluated runs: new folder layout, archive video settings, upload button
+Why: evaluated policy runs are now kept in `data/eval/<policy run>/<checkpoint>/<run id>/` (e.g. `Ampere_20261121-180315_s01_v1_act/best_model/20261125-114115/`), their videos are encoded with the demo archive's settings (H.264 4:4:4, CRF 12, still 10 frames per second), and card 5 has a button *Upload to the Training machine*. The upload also sends `policy_log.h5` per run: the inference node's log of that run without the images (published actions, predicted chunks, temporal-ensembling buffer, about 1–5 MB per minute instead of about 1.4 GB). Code: commit `5a18b19`, merged into `main` as `996f076`; tests ran on the Training machine only. The Training machine's copy of the 20 runs of 2026-11-25 has already been moved into the new layout (checksums of all 60 videos and signals files unchanged).
+Steps:
+1. Ask the person at the station before step 3: it restarts APE, and a restart stops every launch APE started. No policy may be running, and no demo may be being recorded or saved.
+2. In the `rwr_system` checkout APE runs from (on `policy-eval`): `git status --short`. If it lists changes to tracked files under `ape_ui/`, `src/logger/`, `experiments/` or `CLAUDE.md`, stop and report them (blocked); do not commit, stash or discard them. Otherwise: `git fetch origin && git merge --ff-only origin/main`. That checkout then has the same code as `main`. If the fast-forward is refused, stop and report the message (blocked).
+3. Restart APE (`ape_ui/run.sh`). In its terminal output, expect "Evaluated runs: 20 moved into the folders of their policy and checkpoint." (or the number of runs that were in `data/eval/`), with no line listing a problem below it. Then check: `find ~/rwr_humble_ws/data/eval -maxdepth 1` shows only policy folders and `trials.csv`, and card 5 lists all runs as before, with an *Uploaded* column and the button *Upload to the Training machine* above the list.
+4. Open one old run in card 5 and press *Watch the videos*: both videos must play. Then press *Upload to the Training machine*. The log in card 3 should:
+   - send no video or `signals.h5` of the 20 runs again (they are on the Training machine with the same content);
+   - write a `policy_log.h5` for every run whose inference log is still in `~/rwr_humble_ws/inference_logs/`;
+   - end with "Verified on the Training machine: N of N run(s)".
+   The *Uploaded* column then shows *yes* for every run. Do not delete anything in `inference_logs/`; whether to delete the logs is the person's decision.
+5. Only if the person wants a live test now, with two people present and one at the stop button (this instruction does not authorise motion): one short live policy run (about 1 minute) with any checkpoint. During it, note the CPU load of the two `ffmpeg` processes (`top`, sorted by CPU) and whether *Prediction time* in card 4 changes compared with earlier runs. After it, in that run's `trial.json`: `video_frames_lost` (should be 0) and `video.oakd_front_view.video_args` (should contain `yuv444p`). Watch its videos in card 5, then upload it. If frames were lost or the policy paused more than before, restart APE with `APE_EVAL_VIDEO_PRESET=veryfast` in the environment (about a third of the CPU time, about 1 dB lower quality) and repeat the run once.
+Report back in `ROBOT_PC_STATE.md`:
+- the commit of the code checkout after step 2;
+- the move line from APE's output (step 3), and any problem lines;
+- whether both videos played (step 4);
+- from the upload log (step 4): runs verified, `policy_log.h5` files written, runs without an inference log, and the size of one `policy_log.h5` next to the size of its inference log;
+- if step 5 was done: the ffmpeg CPU load, prediction time before and during, `video_frames_lost`, MB per minute of the two videos, and whether `veryfast` was needed;
+- anything blocked, and why.
