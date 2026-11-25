@@ -470,7 +470,9 @@ class PolicyPlayerAgent(Node):
                 problems.append(f"{key} missing")
                 continue
             age = (now - rclpy.time.Time.from_msg(stamp)).nanoseconds / 1e9
-            if not 0.0 <= age <= self.max_observation_age:
+            # -0.05 s, not 0: the arm state is stamped by the NUC, whose clock runs about 1 ms ahead of this PC's, so a
+            # fresh qpos_arm often has a slightly negative age. With 0 that caused most "Policy output paused" steps.
+            if not -0.05 <= age <= self.max_observation_age:
                 problems.append(f"{key} age {age:.3f} s")
         return problems
 

@@ -814,7 +814,7 @@ class RosMonitor:
     @property
     def commands_flowing(self):
         """True while arm commands are really being sent (teleop running, or a smooth move)."""
-        return len([t for t in self._cmd_times if time.time() - t < 0.5]) >= 5
+        return len([t for t in self._cmd_times if time.time() - t < 0.5]) >= 3   # >= 6 Hz: the policy sends exactly 10 Hz, so a 10 Hz cut-off flickered
 
     @property
     def moving(self):
@@ -827,7 +827,7 @@ class RosMonitor:
 
     @property
     def hand_following(self):
-        return len([t for t in self._hand_times if time.time() - t < 0.5]) >= 5
+        return len([t for t in self._hand_times if time.time() - t < 0.5]) >= 3   # >= 6 Hz, see commands_flowing
 
     def info(self):
         age = time.time() - self.robot_stamp if self.robot_stamp else None
@@ -985,6 +985,8 @@ class Operate:
             raise ControlError("The logger is not running, so nothing can be recorded.")
         if monitor.moving:
             raise ControlError("The arm is still moving to a pose. Wait, or stop the move first.")
+        if mover.running and not (teleop.running or recording.running):
+            raise ControlError("Start the station launch first (section 2). Only the arm mover for Move to center is running.")
         robot = monitor.info()["robot"]
         notes = []
         if monitor.ready("resume") and not robot:
@@ -1048,6 +1050,10 @@ class Operate:
         return ""
 
     def _move(self, key, what, target, goal_quat=None):
+        if inference.running and (inference.policy_on or inference.init == "moving"):
+            raise ControlError("The policy drives the arm. Stop the policy first.")
+        if monitor.moving:   # by the clock, so it holds before the first targets have arrived here
+            raise ControlError("A move is already running.")
         if monitor.commands_flowing:
             raise ControlError("A move is already running." if monitor.moving else "Pause teleop first.")
         robot = monitor.info()["robot"]
@@ -1058,9 +1064,14 @@ class Operate:
             raise ControlError("The arm position is unknown.")
         if dist > MAX_MOVE_M:
             raise ControlError(f"The {what} is {dist * 100:.0f} cm away, more than the {MAX_MOVE_M * 100:.0f} cm limit. Bring the arm closer first.")
+        started = _ensure_mover(key)
         self.relax_after_start = False
         self._torque(True)   # keep the fingers from flopping while the arm moves
         ok, msg = monitor.call(key)
+        end = time.time() + 5.0
+        while not ok and started and time.time() < end:   # a fresh mover needs a moment to read the arm pose
+            time.sleep(0.3)
+            ok, msg = monitor.call(key)
         if not ok:
             self._torque(False)
             raise ControlError(msg or "The teleop node refused: it has no robot pose yet, or teleop is running.")
@@ -1323,7 +1334,10 @@ recording = PtyProcess("recording")
 job = PtyProcess("job")  # processing and checking recorded demos
 job.dataset = None
 inference = InferenceProc()
-PROCS = {"nuc": nuc, "teleop": teleop, "recording": recording, "job": job, "inference": inference}
+# The arm teleop node on its own, so Move to center works without the station launch. Paused it publishes
+# nothing; it only sends arm targets during a move. Stopped before a station launch, which brings its own.
+mover = PtyProcess("mover")
+PROCS = {"nuc": nuc, "teleop": teleop, "recording": recording, "job": job, "inference": inference, "mover": mover}
 monitor = None
 
 
@@ -1353,6 +1367,7 @@ async def lifespan(app):
     threading.Thread(target=policy_watch, daemon=True).start()
     threading.Thread(target=eval_watch, daemon=True).start()
     yield
+    mover.stop(grace=3.0)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -1380,7 +1395,7 @@ def status():
         "disk_free_gb": round(usage.free / 1e9, 1),
         "datasets_dir": str(RAW),
         "hf_repo": station.hf_repo(),
-        "features": ["lighting", "meta", "description", "orientation", "inference", "timing", "eval"],
+        "features": ["lighting", "meta", "description", "orientation", "inference", "timing", "eval", "mover"],
         "eval": {**evals.info(), "live": live.info()},
         "time": time.time(),
     }
@@ -1388,6 +1403,44 @@ def status():
 
 def hand_only_launch():
     return recording.running and getattr(recording, "mode", None) == "hand_only"
+
+
+def _ensure_mover(key):
+    """Make sure a node answers the move service. Without the station launch, start the arm teleop node on its own.
+    Returns True if it was started just now."""
+    if monitor.ready(key):
+        return False
+    if teleop.running or recording.running:
+        raise ControlError("The station launch is running, but its arm teleop node does not answer. Check its Log.")
+    own = {p.pid for p in PROCS.values() if p.pid}
+    if any(e in ("teleop", "recording") for e in external_launches(own)):
+        raise ControlError("A station launch runs in a terminal outside this page, and its arm teleop node does not answer.")
+    if not mover.running:
+        mover.start(ros2_cmd("run", "experiments", "run_teleop_rokoko.py", "--ros-args", "-r", "__node:=ape_arm_mover",
+                             "-p", "interactive:=false", "-p", "enable_left:=false", "-p", "enable_right:=true"),
+                    cwd=WORKSPACE, env=ROS_ENV)
+    end = time.time() + 25.0
+    while time.time() < end and not monitor.ready(key):
+        if not mover.running:
+            raise ControlError(f"The arm mover stopped (exit code {mover.exit_code}). See the APE terminal.")
+        time.sleep(0.3)
+    if not monitor.ready(key):
+        raise ControlError("The arm mover did not start within 25 s.")
+    return True
+
+
+def _stop_mover():
+    """Before a station launch: it starts its own arm teleop node with the same services."""
+    if not mover.running:
+        return
+    if monitor and monitor.moving:
+        raise HTTPException(409, "The arm is still moving to the center pose. Wait, or stop the move first.")
+    mover.stop(grace=5.0)
+    end = time.time() + 15.0
+    while mover.running and time.time() < end:
+        time.sleep(0.2)
+    if mover.running:
+        raise HTTPException(409, "The arm mover for Move to center did not stop. Try again.")
 
 
 def _launch_guard():
@@ -1456,6 +1509,8 @@ def policy_command(action, override=False):
         raise ControlError("The policy is still loading. Wait until the card says it is ready.")
     if inference.init == "moving":
         raise ControlError("The arm is still moving to the center pose. Wait, or press Stop policy.")
+    if monitor.moving:
+        raise ControlError("The arm is still moving to a pose. Wait, or stop the move first.")
     if inference.policy_on:
         raise ControlError("The policy is already running." if action == "start" else "Stop the policy first.")
     if action == "reset":
@@ -1719,6 +1774,7 @@ def eval_video(trial_id: str, cam: str):
 async def teleop_start(request: Request):
     body = await request.json()
     _launch_guard()
+    await asyncio.to_thread(_stop_mover)
     args = ["launch", "experiments", "teleop_rokoko.launch.py", "enable_keyboard_runner:=false"]
     if not body.get("hand", True):
         args.append("enable_hand_controller:=false")
@@ -1735,6 +1791,7 @@ async def recording_start(request: Request):
     if not DATASET_NAME.match(name):
         raise HTTPException(400, "Session name: letters, digits, _ and - only, starting with a letter or digit, e.g. s03_2026-11-24_opA.")
     _launch_guard()
+    await asyncio.to_thread(_stop_mover)
     args = [
         "launch", "experiments", "record_demonstration.launch.py",
         f"storage_base_path:={RAW}", f"dataset_name:={name}", "enable_keyboard_runner:=false",
@@ -1752,6 +1809,7 @@ def hand_only_start():
     """Gloves, retargeter and ORCA hand without the arm: no arm teleop, cameras or logger.
     It runs in the station launch's slot, so the same Stop button, Log and guards apply."""
     _launch_guard()
+    _stop_mover()
     recording.hand, recording.mode = True, "hand_only"
     recording.start(ros2_cmd("launch", "experiments", "teleop_rokoko.launch.py", "teleop_arm:=false", "enable_keyboard_runner:=false"),
                     cwd=WORKSPACE, env=ROS_ENV)

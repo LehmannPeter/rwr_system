@@ -332,6 +332,7 @@ input[type=range] { width: 100%; }
         <button class="primary" id="pol-preview" title="Loads the policy and starts the cameras and the ORCA hand. The policy's outputs are only shown, nothing is sent to the arm or the hand.">Start preview</button>
         <button class="rec" id="pol-live" title="Loads the policy and starts the cameras and the ORCA hand. Once you press Start policy, its outputs drive the arm and the hand.">Start live</button>
         <button class="danger" id="pol-stop">Stop</button>
+        <button id="pol-center" hidden title="The same move as Move to center in the Operate card: smooth, about 10 cm per second. Works without the station launch and before or after a policy run, not while the policy drives the arm.">Move to center</button>
       </div>
     </div>
     <div class="muted" id="pol-info"></div>
@@ -558,7 +559,7 @@ $('op-discard').onclick = () => { if (confirm('Discard this demo? It cannot be r
 const moveAsk = (what, d) => confirm(`Move the arm to the ${what} now? It is ${d != null ? Math.round(d * 100) + ' cm away (about ' + Math.max(1, Math.round(d / 0.10)) + ' s)' : 'an unknown distance away'}. The arm moves by itself, slowly. Keep clear and keep a hand on the stop button.`);
 $('op-init').onclick = () => { if (moveAsk('saved custom pose', OP && OP.start_pose && OP.start_pose.distance)) ctl('move2init'); };
 for (const b of $('tg-after').querySelectorAll('button')) b.onclick = () => ctl('after_stop', {value: b.dataset.a});
-$('op-center').onclick = () => { if (moveAsk('center pose', OP && OP.center && OP.center.distance)) ctl('move2center'); };
+$('op-center').onclick = () => { if (OP && OP.moving) return ctl('move_stop'); if (moveAsk('center pose', OP && OP.center && OP.center.distance)) ctl('move2center'); };
 $('op-setinit').onclick = () => { if (confirm((OP && OP.start_pose && OP.start_pose.saved ? 'Replace the saved custom pose' : 'Save the custom pose') + ' with the pose the arm is in right now?')) ctl('set_start'); };
 for (const [id, action] of [['tg-accurate', 'accurate'], ['tg-coil', 'coil_reverse'], ['tg-follow', 'hand_follow'], ['tg-torque', 'hand_torque']])
   for (const b of $(id).querySelectorAll('button')) b.onclick = () => ctl(action, {on: b.dataset.v === '1'});
@@ -609,16 +610,22 @@ function renderOperate(s) {
   pauseOnly.style.display = (o.active && haveLog && o.rec === 'idle' && !o.mustPause) ? '' : 'none'; pauseOnly.textContent = 'Pause teleop';
   $('op-review').style.display = o.rec === 'review' ? 'flex' : 'none';
   $('op-msg').innerHTML = o.message ? `<div class="note warn">${esc(o.message)}</div>` : '';
-  $('op-toggles').classList.toggle('dim', !available);
+  // without a launch only Move to center stays usable (the server's arm mover); the other switches need the launch
+  const moverRow = $('op-center').closest('.toggle'), keepCenter = (s.features || []).includes('mover');
+  $('op-toggles').classList.remove('dim');
+  for (const t of $('op-toggles').children) t.classList.toggle('dim', !available && !(keepCenter && t === moverRow));
   seg('tg-accurate', o.accurate, !!SV.accurate && !o.teleop_running);
   seg('tg-coil', !!o.coil_yaw_deg, !o.teleop_running && o.rec === 'idle');
   $('op-coil-d').textContent = (o.coil_yaw_deg && Math.abs(o.coil_yaw_deg) !== 180 ? `Glove directions are turned by ${o.coil_yaw_deg}° (set in the station file). ` : '') + 'Turn on if the arm moves opposite to your hand. Sideways and forward/back reverse together; up/down stays. Change only while paused.';
   seg('tg-follow', o.hand_following, haveHand);
   seg('tg-torque', o.torque, !!SV.hand_torque);
-  const sp = o.start_pose || {}, ce = o.center || {}, canMove = !o.teleop_running && !o.moving && !!(r && r.mode === 'ready');
+  const sp = o.start_pose || {}, ce = o.center || {}, canMove = !o.teleop_running && !o.policy_running && !o.moving && !!(r && r.mode === 'ready');
+  const haveMover = (s.features || []).includes('mover');   // the server starts the arm teleop node by itself for Move to center
   const cm = v => Math.round(v * 100) + ' cm', tooFar = v => v != null && v > o.max_move;
   $('op-init').disabled = !SV.move2init || !canMove || !sp.saved || sp.distance == null || tooFar(sp.distance);
-  $('op-center').disabled = !SV.move2center || !canMove || ce.distance == null || tooFar(ce.distance);
+  const oc = $('op-center'), ocLabel = o.moving ? 'Stop move' : 'Move to center';   // also the way to stop a move started without a launch
+  if (oc.textContent !== ocLabel) oc.textContent = ocLabel; oc.className = o.moving ? 'rec' : '';
+  oc.disabled = busy || (!o.moving && (!(SV.move2center || haveMover) || !canMove || ce.distance == null || tooFar(ce.distance)));
   $('op-setinit').disabled = !SV.set_start || o.teleop_running || !!o.moving || !r;
   $('op-init-d').textContent = !sp.saved ? 'No custom pose saved yet. Bring the arm to the pose you want (teleop, then pause), then press Set.'
     : sp.distance == null ? 'A custom pose is saved. Arm position unknown.'
@@ -917,6 +924,10 @@ $('pol-init').onclick = () => {
   const ask = polCenter(INF) ? 'Move the arm to the center pose' + (dist != null ? ` (${(dist * 100).toFixed(0)} cm away)` : '') + '?' : 'Move the arm to the pose where the training demos start?';
   if (confirm(ask + '\n\nThe arm moves by itself, slowly (about 2 cm per second), in a straight line. Keep clear and keep a hand on the stop button. Stop policy halts the move.')) polCmd('init_arm');
 };
+$('pol-center').onclick = () => {
+  if (OP && OP.moving) return ctl('move_stop');
+  if (moveAsk('center pose', OP && OP.center && OP.center.distance)) ctl('move2center');
+};
 $('pol-run').onchange = () => { store('pol_run', $('pol-run').value); fillPolicies(); store('pol_ckpt', $('pol-ckpt').value); loadChecks(); };
 $('pol-ckpt').onchange = () => { store('pol_ckpt', $('pol-ckpt').value); loadChecks(); };
 function polView(p, robot) {   // what the loaded policy is doing, for this card and for the Operate card
@@ -953,6 +964,15 @@ function renderPolicy(s) {
   $('pol-run').disabled = $('pol-ckpt').disabled = p.running;
   $('pol-preview').disabled = $('pol-live').disabled = p.running || ext || other || !chosen;
   $('pol-stop').disabled = !p.running || p.stopping;
+  const haveMover = (s.features || []).includes('mover'), pc = $('pol-center');
+  pc.hidden = !haveMover;
+  if (haveMover) {
+    const o = OP || {}, ce = o.center || {}, moving = !!o.moving;
+    const drives = p.running && (p.policy_on || p.init === 'moving');
+    const label = moving ? 'Stop move' : 'Move to center'; if (pc.textContent !== label) pc.textContent = label;
+    pc.className = moving ? 'rec' : '';
+    pc.disabled = busy || (!moving && (drives || o.teleop_running || !(polRobot && polRobot.mode === 'ready') || ce.distance == null || ce.distance > o.max_move));
+  }
   $('pol-box').style.display = v ? '' : 'none';
   let notes = '';
   if (v) {
@@ -962,7 +982,7 @@ function renderPolicy(s) {
     const go = $('pol-go'); if (go.textContent !== v.go) go.textContent = v.go; go.className = v.goCls; go.disabled = !v.goOn || polBusy;
     const idle = p.node_ready && !p.policy_on && p.init !== 'moving' && !p.stopping;
     $('pol-reset').disabled = !idle || polBusy;
-    $('pol-init').style.display = !p.preview && p.arm_init ? '' : 'none';
+    $('pol-init').style.display = !p.preview && p.arm_init && !haveMover ? '' : 'none';
     const initLabel = polCenter(p) ? 'Move to center' : 'Move arm to the demos\' start pose'; if ($('pol-init').textContent !== initLabel) $('pol-init').textContent = initLabel;
     $('pol-init').title = polCenter(p) ? 'The arm moves slowly (2 cm per second) to the center pose: the same pose as Move to center in the Operate card.' : 'The inference node moves the arm slowly (2 cm per second) to the pose where the training demos start.'; $('pol-init').disabled = !idle || polBusy || !(polRobot && polRobot.mode === 'ready');
     if (!p.node_ready && !p.stopping && p.age > 120) notes += W('warn', 'Loading takes unusually long. Open the Log below: the policy may have failed to load.');

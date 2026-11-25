@@ -61,7 +61,10 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
      custom* then returns the arm to it. The pose is
      stored in `~/.ros/teleop_start_pose_right.json`; delete the file to forget it.
    - *Center pose*: *Move to center* brings the arm to 45 cm forward, centred, 40 cm up,
-     palm down (teleop node parameter `center_position`).
+     palm down (teleop node parameter `center_position`). It also works without the station
+     launch: APE then starts the arm teleop node on its own (`ape_arm_mover`, process
+     `mover`), which publishes arm targets only during a move. APE stops it before it starts
+     a station launch, which brings its own teleop node. Only the Franka controller is needed.
    - *After stopping a recording*: Stay, Center or Custom. With Center or Custom,
      the arm moves there by itself as soon as you press *Stop recording and pause* (the
      fingers stay powered until it arrives). The choice is remembered
@@ -111,10 +114,13 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
    - *Start live*: the policy's outputs go to the arm and the hand once *Start policy* is
      pressed. Both steps ask for confirmation.
    - *Start policy* / *Stop policy* (also the big button in the Operate card, with a timer),
-     *Reset policy state*, and in a live launch *Move to center*: the same center pose
-     as *Move to center* in the Operate card, with the same rotation correction. The teleop
-     node is not running in a policy launch, so the inference node drives the arm
-     (`init_arm`, about 2 cm per second). The correction is read when the launch starts.
+     *Reset policy state*, and *Move to center* (next to *Stop*): since 2026-11-25 the same
+     move as in the Operate card (smooth, about 10 cm/s, with settling), through the arm
+     mover, so it works with or without a policy launch. It is refused while the policy
+     drives the arm, and *Start policy* is refused while the arm moves. While moving the
+     button reads *Stop move*. (Before, the button only existed in a live launch and the
+     inference node drove the arm with `init_arm` at about 2 cm/s; that path is still in
+     the node and the page uses it only with a server from before this change.)
    - APE stops a live policy by itself when the robot leaves Ready (reflex, stop button,
      controller gone), so no targets pile up for the next controller start. Stop policy
      makes the arm hold its last target; it is not a safety stop.
