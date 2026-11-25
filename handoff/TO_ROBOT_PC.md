@@ -31,16 +31,23 @@ Steps:
 Report back: the output of step 2 and step 3 (frames kept and removed per raw topic), the sizes before and after, whether the upload succeeded, and where the `.uncut` files are.
 
 ## 2026-11-25-01: Video archive: set up the transfer, archive s01–s03 if their raw files still exist, run the test checklist
-Why: the branch `video-archive` adds to APE's "Process and check new demos" an MP4 archive of every raw recording (about 6 % of its size), a checksum-verified copy to the Training machine and a guarded "Clear transferred demos". Most raw recordings of s01–s03 never reached Hugging Face, so if they are still on this PC they are the only copy.
+Why: the video archive code (branch `video-archive`; `policy-eval` contains the same code) adds to APE's "Process and check new demos" an MP4 archive of every raw recording (about 6 % of its size), a checksum-verified copy to the Training machine and a guarded "Clear transferred demos". Most raw recordings of s01–s03 never reached Hugging Face, so if they are still on this PC they are the only copy.
+When: only **after** the team has finished testing the `policy-eval` branch (both repos) and has set up ssh to the Training machine. Do not start while that test is still going on.
+Where this instruction lives: on `main`. If this checkout is on another branch (e.g. `policy-eval`), read the current version with `git show origin/main:handoff/TO_ROBOT_PC.md` instead of the file in the checkout, and commit the report on `main` through a worktree as described at the end.
 Steps:
 1. Ask the person at the station before you start: steps 6–7 run APE jobs that keep the CPU busy (do not run them during recording or a policy run), and the checklist in step 7 contains deletion tests. No step moves the robot or the hand.
-2. Switch the code, then restart APE (no job, recording or policy running):
+2. Stay on the current branch (no switch); check that it is clean and has the archive code:
    ```bash
-   cd ~/Projects/rwr_system && git status --short    # must be empty; otherwise stop and report (blocked)
-   git fetch origin && git switch video-archive && git pull --rebase
+   cd ~/Projects/rwr_system && git branch --show-current && git log -1 --oneline    # expected: policy-eval; write both down for the report
+   git status --short    # must be empty; otherwise stop and report (blocked), do not stash or discard anything
+   git fetch origin
+   for f in ape_ui/archive_job.py src/logger/encode_archive.py; do
+     if [ -f "$f" ] && git diff --quiet origin/video-archive -- "$f"; then echo "$f: same as video-archive"; else echo "$f: MISSING or DIFFERENT"; fi
+   done
    ```
-   Restart APE (Ctrl-C in its terminal, then `~/Projects/rwr_system/ape_ui/run.sh`).
+   Both lines must say "same as video-archive". If either says MISSING or DIFFERENT, the checkout is on a branch without the archive code (or with another version of it): stop and report (blocked); do not switch branches. `rwr_il` stays on its current branch: the archive does not use it.
 3. ssh to the Training machine, host alias `rwr-instance`:
+   - If `ssh -o BatchMode=yes rwr-instance true` already returns at once without any prompt and `ssh -G rwr-instance | grep -i identityfile` shows `~/.ssh/rwr_collect` (the team set it up before the policy-eval test), skip the setup below and only do the version checks in the last bullet.
    - Copy the gateway key from the team zip into `~/.ssh/` (`chmod 600`). Gateway host, user and port are in the zip; never copy them into this repo.
    - Make a new passwordless key for the transfers: `ssh-keygen -t ed25519 -N "" -f ~/.ssh/rwr_collect -C "robot-pc rwr_collect"`.
    - Send `~/.ssh/rwr_collect.pub` (the public key only, never the private one) to Johan or David in the team chat; either of them adds it to `~/.ssh/authorized_keys` of the account on the Training machine. Wait for their confirmation.
@@ -71,9 +78,9 @@ Steps:
    ```
    Expected counts if complete: s01 20, s02 46, s03 5. Report the data root in `ROBOT_PC_STATE.md` if it is not `~/rwr_humble_ws/data`.
 6. If any of them exist: archive them before anything else. In APE choose each of these sessions and press *Process and check new demos* (one at a time). This only reads the raw files and copies to the Training machine; it deletes nothing. Expected: every demo becomes *verified* (not *+ HF* yet). Exception: `s03 … 20261121_215255` may stay *not verified*: its files were cut separately on the Training machine and here (instruction 2026-11-23-01), so the two copies can differ byte for byte. That is correct, and it must not be cleared. If this PC's processed files of a session were deleted earlier, the job re-creates them, and they may differ byte for byte from the copies already on the Training machine. Those demos then show *not verified* ("processed … different"): report the counts and change nothing on either machine. Do **not** press *Clear transferred demos* for s01–s03. The `*.h5.uncut` originals left by instruction 2026-11-23-01 are not archived and not copied; leave them where they are.
-7. Then follow `ape_ui/TEST_VIDEO_ARCHIVE.md` from section 0, using a new short test session with 2–3 demos, with two changes because `archive_require_hf_backup` is false: skip section 3 (Hugging Face requirement), and in section 4 start from all demos *verified* (not *verified + HF*). Get the person's OK before each step that deletes something (the *Clear* steps in section 4, and the remote byte change there, which Johan or David makes on the Training machine).
-Report back in `ROBOT_PC_STATE.md` **on `main`**: this checkout is on `video-archive` after step 2, so edit and commit the report in a worktree of `main` (`git worktree add ~/rwr_system_main main`, then the usual commit of only that file and `git pull --rebase && git push` there):
-- branch and commit;
+7. Then follow `ape_ui/TEST_VIDEO_ARCHIVE.md` from section 0 (skip its first item, `git switch video-archive`: stay on the branch from step 2), using a new short test session with 2–3 demos, with two changes because `archive_require_hf_backup` is false: skip section 3 (Hugging Face requirement), and in section 4 start from all demos *verified* (not *verified + HF*). Get the person's OK before each step that deletes something (the *Clear* steps in section 4, and the remote byte change there, which Johan or David makes on the Training machine).
+Report back in `ROBOT_PC_STATE.md` **on `main`**: this checkout is not on `main` (it stays on the branch from step 2), so edit and commit the report in a worktree of `main` (`git worktree add ~/rwr_system_main main`, then the usual commit of only that file and `git pull --rebase && git push` there):
+- the branch and commit from step 2, and the two lines of its archive-code check;
 - ssh: working yes/no, rsync versions on both sides (no host names, users or keys);
 - the APE data root from step 5;
 - s01–s03: number of raw h5 files and GB per session, and for each session the counts *archived / verified / not verified* with the reasons shown in APE;
