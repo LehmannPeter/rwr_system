@@ -38,6 +38,25 @@ from srl_il.export.policy import get_policy_from_ckpt
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 
 import h5py
+
+# An arm action's quaternion is rescaled to length 1 before it is sent. The temporal ensembling averages the predicted
+# chunks number by number, and an average of unit quaternions is a little shorter than 1 (more so the more the chunks
+# disagree), so a strict length check threw away 5-10 % of all arm actions (measured in the evaluated runs of
+# 2026-11-25) and every rejection reset the policy. Only a quaternion far from length 1 is still rejected: 0.9 means
+# averaged predictions about 100 degrees apart, or a broken output.
+QUAT_NORM_RANGE = (0.9, 1.1)
+
+
+def unit_pose(action):
+    """The arm action [x, y, z, qx, qy, qz, qw] with its quaternion rescaled to length 1, or None if the quaternion's
+    length is outside QUAT_NORM_RANGE (or the action is not 7 finite numbers)."""
+    action = np.asarray(action, dtype=np.float64)
+    if action.shape != (7,) or not np.isfinite(action).all():
+        return None
+    norm = np.linalg.norm(action[3:])
+    if not QUAT_NORM_RANGE[0] <= norm <= QUAT_NORM_RANGE[1]:
+        return None
+    return np.concatenate([action[:3], action[3:] / norm])
 import os
 
 class CameraListener(Node):
@@ -378,10 +397,12 @@ class PolicyPlayerAgent(Node):
                 self.discard_actions(f"invalid {key} action")
                 return False
             if self._is_arm_key(key):
-                if action.shape != (7,) or not np.isclose(np.linalg.norm(action[3:]), 1.0, atol=0.001):
-                    self.discard_actions(f"invalid {key} pose")
+                pose = unit_pose(action)
+                if pose is None:
+                    length = np.linalg.norm(action[3:]) if action.shape == (7,) else float("nan")
+                    self.discard_actions(f"invalid {key} pose (quaternion length {length:.3f})")
                     return False
-                messages[key] = self.pose_message(action, stamp)
+                messages[key] = self.pose_message(pose, stamp)
             else:
                 messages[key] = numpy_to_float32_multiarray(action)
 
