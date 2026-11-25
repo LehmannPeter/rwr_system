@@ -1332,6 +1332,10 @@ nuc = NucSession()
 teleop = PtyProcess("teleop")
 recording = PtyProcess("recording")
 job = PtyProcess("job")  # processing and checking recorded demos
+# Processing and uploads run at the lowest CPU priority (inherited by every child), so they can run during a
+# recording: teleop, cameras and the logger always get the CPU first. ionice is not used: the NVMe disk has no
+# I/O scheduler ("none"), so it would do nothing. Uploads go out over wifi/VPN, not the robot's wired link.
+BACKGROUND = ["nice", "-n", "19"]
 job.dataset = None
 inference = InferenceProc()
 # The arm teleop node on its own, so Move to center works without the station launch. Paused it publishes
@@ -1903,15 +1907,13 @@ def dataset_process(dataset: str):
         raise HTTPException(409, "Another processing job is still running.")
     if inference.policy_on or evals.busy:
         raise HTTPException(409, "Stop the policy first: processing is heavy and would make the policy stall.")
-    if operate.rec in ("recording", "saving"):
-        raise HTTPException(409, "Wait until the current demo is recorded and saved: processing is heavy and could disturb the recording.")
     try:
         script, prev = station.process_command(dataset)
     except DataError as exc:
         raise HTTPException(400, str(exc))
     prev.mkdir(parents=True, exist_ok=True)
     job.dataset = dataset
-    job.start(["bash", "-c", script], cwd=WORKSPACE, env=ROS_ENV)
+    job.start([*BACKGROUND, "bash", "-c", script], cwd=WORKSPACE, env=ROS_ENV)
     return job.info()
 
 
@@ -1941,12 +1943,10 @@ def upload_start():
         raise HTTPException(409, "Another processing or upload job is still running.")
     if inference.policy_on:
         raise HTTPException(409, "Stop the policy first: uploading could make the policy stall.")
-    if operate.rec in ("recording", "saving"):
-        raise HTTPException(409, "Wait until the current demo is recorded and saved: uploading could disturb the recording.")
     if not station.hf_repo():
         raise HTTPException(400, "No Hugging Face repo is set yet. Run once in a terminal: python " + str(station.tool) + " push --repo <user>/<name>")
     job.dataset = "upload"
-    job.start(station.upload_command(), cwd=WORKSPACE)
+    job.start([*BACKGROUND, *station.upload_command()], cwd=WORKSPACE)
     return job.info()
 
 

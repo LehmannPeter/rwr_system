@@ -87,8 +87,11 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
 5. **Recorded demos:** lists every demo of a dataset with its size and check result.
    *Process and check new demos* synchronizes the demos that are not processed yet and
    runs the inspection on each; already processed demos are skipped. *View* plays a
-   processed demo (both cameras, with a slider). Processing is refused while a demo is
-   being recorded or saved.
+   processed demo (both cameras, with a slider). Since 2026-11-25 processing (and the upload
+   below) may run while you record: the job runs at the lowest CPU priority (`nice 19`), and
+   the logger saves each demo as `<name>.h5.part` and renames it when complete, so a job never
+   reads a half-written file. A demo saved while the job runs is picked up by the next *Process*.
+   Not yet measured on a real recording (stream rates and gaps with and without a job).
    - *Process and check new demos* also archives and copies each demo to the Training machine
      (see "Video archive and transfer" below). The column *Archive / Training machine* shows
      per demo: not archived, archived, archive failed, not verified, verified, cleared here.
@@ -241,7 +244,7 @@ browser tab stops nothing.
 - *Upload to Hugging Face* runs `rwr_data.py push` as the processing job: raw and processed
   recordings that are not uploaded yet, the manifest and the dataset version lists. It needs
   a one-time `pixi run hf auth login` and `rwr_data.py push --repo <user>/<name>` in a
-  terminal, and is refused while a demo is being recorded or saved.
+  terminal. It may run during a recording, at the lowest CPU priority, like processing.
 - The files as they were before the data layout change are in `backup_before_data_layout/`.
 - Live view arm plots: path from above and from the side, measured (blue) and commanded
   (dashed, only while teleop runs), the custom pose as a diamond, plus the readouts *Arm

@@ -144,8 +144,12 @@ class DemoLogger(Node):
         self.get_logger().info(f"Recording saved as '{h5_filename}' in folder '{self.task_folder}'")
         
         # Convert to HDF5 and delete the bag file afterward
+        # Written under a temporary name and renamed when complete, so APE's processing and upload jobs, which may
+        # run during recording, never pick up a half-written file (they only look at *.h5).
+        part_path = h5_filepath.with_name(h5_filename + ".part")
         with self.file_operation_lock:
-            convert_to_h5(input_bag_path=str(self.task_folder_bag), output_h5_path=str(h5_filepath))
+            convert_to_h5(input_bag_path=str(self.task_folder_bag), output_h5_path=str(part_path))
+            part_path.replace(h5_filepath)
         self.get_logger().info(f"Recording converted to HDF5: {h5_filepath}")
         self.delete_recording(self.task_folder_bag)
         response.success = True

@@ -165,6 +165,7 @@ Images are sampled by nearest timestamp; poses are interpolated linearly with sl
 - The Quick Guide's inference command omits `policy_ckpt_path`, which is required.
 - The MXIDs committed in `cube_sorting_task.yaml` are the course station's. Confirm them on the actual station; `.gitignore` excludes `local/` for station-specific copies, passed as `oakd_config:=`.
 - Raw recordings hold uncompressed images and are large. `*.h5` is git-ignored.
+- The logger writes each raw file as `<name>.h5.part` and renames it to `.h5` when complete (since 2026-11-25), because APE's processing and upload jobs may run during a recording (at `nice 19`). Tools that read raw files must only take `*.h5`. A leftover `.h5.part` is a save that failed midway.
 - The keyboard runner's software pause holds the last targets. It is not an emergency stop.
 - Language conditioning for the bonus subtask is not wired up. `keyboard_runner.py --prompt_task_description` publishes `/task_description`, but `datacollection_right.yaml` does not record it and the inference node passes no text to the policy.
 - Retargeter setting variants (fit2, fit4, fit4_thumb2, fit5), their backups and the offline comparison script are in `~/rwr_humble_ws/retargeter_fits/` on the Robot PC; which one is live is in `handoff/ROBOT_PC_STATE.md`.

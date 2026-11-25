@@ -1141,14 +1141,14 @@ function renderExtras(s) {
   $('live-note').textContent = (cams.front_view || cams.wrist_view) ? '' : 'Cameras are off: they run with the station launch (section 2) or a policy launch (section 4).';
   const jr = s.procs.job;
   pill($('job-pill'), jr.running ? (jr.stopping ? 'Stopping…' : (s.job_dataset === 'upload' ? 'Uploading…' : String(s.job_dataset || '').startsWith('clear ') ? `Clearing ${s.job_dataset.slice(6)}…` : `Processing ${s.job_dataset || ''}…`)) : (jr.exit_code != null && jr.exit_code !== 0 ? 'Last run had errors' : 'Idle'), jr.running ? 'warn busy' : (jr.exit_code != null && jr.exit_code !== 0 ? 'bad' : ''));
-  $('ds-process').disabled = jr.running || !$('ds-select').value || o.rec === 'recording' || o.rec === 'saving';
+  $('ds-process').disabled = jr.running || !$('ds-select').value;
   JOB_RUNNING = jr.running;
   const dSel = DS && DS.find(x => x.name === $('ds-select').value);
   $('ds-clear').disabled = !ARCHIVE_HOST_SET || !dSel || !dSel.clearable || jr.running || ['recording', 'saving', 'review'].includes(o.rec);
   const ft = s.features || [];
   $('lb-note').innerHTML = ft.includes('orientation') ? '' : `<div class="note warn" style="margin-top:8px">Restart APE to store ${ft.includes('description') ? 'the cube orientation' : ft.includes('meta') ? 'the cube orientation and the description' : 'the lighting label, the cube orientation, the description and the settings file of each demo'}. Until then it is not saved.</div>`;
   showPreview();
-  $('ds-upload').disabled = jr.running || o.rec === 'recording' || o.rec === 'saving';
+  $('ds-upload').disabled = jr.running;
   $('ds-upload').title = s.hf_repo ? `Uploads to ${s.hf_repo}: raw and processed recordings that are not there yet, manifest.csv and the dataset version lists` : $('ds-upload').title;
   $('job-stop').disabled = !jr.running || jr.stopping;
   if (renderExtras.jobWas && !jr.running) loadDatasets();
