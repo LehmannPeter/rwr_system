@@ -158,12 +158,49 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
    - When the run has ended, the saved workspace video is counted once more (about 15 s for a
      3 minute run; the next run can be started meanwhile). The live count stays the result; if
      the recount gives another number, the run is marked with * and *Open* shows both.
-   - Saved per run in `data/eval/<date-time>/`: `trial.json` (policy, placements found, result),
+   - Saved per run in `data/eval/<policy run>/<checkpoint>/<date-time>/`, for example
+     `data/eval/Ampere_20261121-180315_s01_v1_act/best_model/20261125-114115/` (the grouping of
+     `inference_logs/`; the checkpoint is its file name without `.pth`; the date-time is the run id
+     and unique over all policies): `trial.json` (policy, placements found, result, `folder`),
      `oakd_front_view.mp4` and `oakd_wrist_view.mp4` (10 frames per second, video time = run
      time), and `signals.h5` with every stream APE receives: measured arm pose, arm commands, the
      policy's arm and hand outputs, measured hand joints, hand commands, hand motor currents and
      temperatures, Franka joint angles, velocities, torques and external force, robot mode, and
      the policy's step timing. `data/eval/trials.csv` has one row per run.
+     Runs saved before 2026-11-26 lay directly in `data/eval/<date-time>/`: APE moves them into
+     the grouped folders when it starts (renames only), or by hand:
+     `python eval_trials.py migrate <data>/eval`.
+   - **Upload to the Training machine** (button above the list of runs): copies every saved run
+     and `trials.csv` to `<archive_data_root>/eval/` on the Training machine, in the same folders,
+     and compares the checksums there (`eval_upload.py`; ssh and rsync settings are the ones of
+     the demo archive, `archive_host` etc. in `static/local/station.json`). Videos and
+     `signals.h5` are sent once and never overwritten there; `trial.json` and `trials.csv` are
+     replaced when they changed here (notes, corrected counts). The column *Uploaded* shows per
+     run: *yes*, *changed since* (upload again), *not verified* (a file is missing there or has
+     other content; see the log in card 3) or *no*. Nothing is deleted on either machine. The
+     button is off while a policy runs or another job of card 3 runs.
+   - **Video settings.** APE encodes the two videos while the run is recorded, with the video
+     settings of the demo archive (`DEFAULT_VIDEO_ARGS` in `src/logger/video_archive_common.py`:
+     H.264 4:4:4, CRF 12, preset medium), at 10 frames per second. A run has no raw images, so
+     there is no compression step before the upload. Measured on the Training machine with one
+     minute of real 960×540 frames per camera: about 79 MB per minute for both cameras, 45 dB
+     PSNR, and about one CPU core while recording (not measured on the Robot PC). The encoders
+     run at `nice 10`, so the policy gets the CPU first; if they fall behind, frames are left out
+     and counted in `video_frames_lost` (`trial.json`). `APE_EVAL_VIDEO_PRESET=veryfast` cuts the
+     CPU time to a third for about 1 dB less. Runs of 2026-11-25 have the earlier settings
+     (4:2:0, CRF 20, about 18 MB per minute, 40 dB); `video_args` in `trial.json` says which.
+     Browsers do not all play H.264 4:4:4, so *Watch the videos* plays a 4:2:0 copy that APE
+     makes in `work/eval_previews/` (not uploaded; it can be deleted at any time).
+   - **`policy_log.h5`** (written by *Upload to the Training machine*, one per run): the inference
+     node's log of that policy start without the images. Per published step: the actions, the
+     non-image observations, and the debug data (the action chunk the model predicted, raw and
+     translated, in the steps in which the model ran; the temporal-ensembling buffer and its
+     mask in every step), gzip-compressed, one array per key over all steps. About 1 to 5 MB per
+     minute, depending on the chunk length (estimated with rwr_il's ensembling code and made-up
+     chunks; not yet made from a real log). The node's own log in `inference_logs/` (about
+     1.4 GB per minute, nearly all of it the images) is not changed, not sent and not deleted;
+     once a run has its `policy_log.h5`, only the network's input images are left that are
+     nowhere else. A run whose inference log is gone is uploaded without `policy_log.h5`.
    - *Evaluated runs* lists each run with its time, cubes placed, cubes placed in the first 3:00
      (what the course counts; for runs of 3:00 or more) and the seconds per cube.
    - *Open* shows one run: the times of the placements counted, the two videos to check them, −
@@ -186,10 +223,12 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
      arm path) is read from the signals by fixed rules in `eval_trials.py`, for information.
    - A live policy started outside the page (`ros2 topic pub`) is recorded as well, without its
      first moment.
-   - Disk: a run's own files are small (videos and signals), but the inference node still
-     writes its log, about 1.4 GB per minute.
+   - Disk: a run's own files are about 80 MB per minute (nearly all video), and the inference
+     node still writes its log, about 1.4 GB per minute.
    - Offline test without ROS: `tests/test_eval.py` (needs `fastapi` and `uvicorn`; with
      `APE_TEST_DEMO` it plays a recorded demo through the recorder and the live count).
+     Folder layout and upload: `python tests/test_eval_upload.py` (numpy and rsync only; a local
+     folder stands in for the Training machine).
      Try the detector on a file: `python eval_detect.py <oakd_front_view.mp4 or processed demo .h5>`.
 
 The top card shows the robot state in words, with the recovery steps when the arm is in

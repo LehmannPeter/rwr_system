@@ -378,7 +378,10 @@ input[type=range] { width: 100%; }
       </div>
       <div class="muted" style="margin-top:4px">Workspace camera left, wrist camera right (as recorded, not turned). Video time is run time. The + button above adds a placement at the time the video shows.</div>
     </div>
-    <p class="sub-h" style="margin:16px 0 4px" id="ev-trials-s">Evaluated runs</p>
+    <div class="row" style="margin-top:16px; justify-content:space-between">
+      <p class="sub-h" style="margin:0" id="ev-trials-s">Evaluated runs</p>
+      <div class="row"><span class="muted" id="ev-upload-s"></span><button id="ev-upload" title="Copies every evaluated run (videos, signals, trial.json, and policy_log.h5: the actions and debug data from the inference log, without its images) and trials.csv to the Training machine and compares the checksums there. Files that are already there are not sent again. Nothing is deleted.">Upload to the Training machine</button></div>
+    </div>
     <div class="scroll"><table class="t" id="ev-trials"></table></div>
   </section>
   </div>
@@ -1005,7 +1008,7 @@ function renderPolicy(s) {
 setInterval(() => { if (!document.hidden && polHave) loadPolicies().then(loadChecks); }, 4000);
 
 /* ---------- evaluation of policy runs ---------- */
-let EV = null, EVL = {trials: [], total: 0}, evHave = false, evBusy = false, evSel = null, evLast = null, evShown = {};
+let EV = null, EVL = {trials: [], total: 0}, evUploading = false, evHave = false, evBusy = false, evSel = null, evLast = null, evShown = {};
 async function loadEval() {
   if (!evHave) return;
   try { const r = await fetch('/api/eval', {cache: 'no-store'}); if (r.ok) { EVL = await r.json(); renderEvalLists(); } } catch (e) {}
@@ -1014,12 +1017,25 @@ const evShort = t => esc((t.run || '').replace(/^(\d{8}-\d{6})_.*/, '$1')) + ' �
 const evEnd = t => esc((EV && EV.end_reasons[t.end_reason]) || t.end_reason || '');
 const evCounting = t => !t.live && !!(t.detection && t.detection.state === 'running');   // no live count: wait for the count from the video
 const evDiffer = t => !!(t.live && t.detection && t.detection.state === 'done' && !t.detection.problem && t.detection.placed.length !== t.live.placed.length);
+const evUp = t => ({uploaded: '<span title="Copied to the Training machine and verified there by checksum">yes</span>', changed: '<span class="tag-warn" title="The note or the count was changed after the upload: upload again">changed since</span>', different: '<span class="tag-warn" title="A file of this run is missing on the Training machine or has other content there: see the log in card 3">not verified</span>'})[t.upload] || '<span class="muted">no</span>';
+function renderUpload() {
+  const u = EVL.upload, b = $('ev-upload');
+  if (!u) { b.style.display = 'none'; $('ev-upload-s').textContent = ''; return; }   // the server is older than this page
+  const busy = EV && EV.state !== 'idle', todo = EVL.total - u.uploaded;
+  b.style.display = ''; b.disabled = !u.host_set || JOB_RUNNING || busy || !EVL.total;
+  $('ev-upload-s').innerHTML = !u.host_set ? 'No Training machine is set (<code>archive_host</code> in station.json).'
+    : evUploading ? 'Uploading… (log in card 3)'
+    : !EVL.total ? '' : todo ? `${todo} of ${EVL.total} not on the Training machine${u.changed ? ` (${u.changed} changed since the upload)` : ''}${u.different ? ` · <span class="tag-warn">${u.different} not verified</span>` : ''}`
+    : `All ${EVL.total} on the Training machine` + (u.checked_at ? ` (checked ${esc(u.checked_at)})` : '');
+}
+$('ev-upload').onclick = async () => { $('job-details').open = true; await post('/api/eval/upload'); };
 function setHtml(id, html) { if (evShown[id] !== html) { evShown[id] = html; $(id).innerHTML = html; } }
 function renderEvalLists() {
   $('ev-trials-s').textContent = `Evaluated runs (${EVL.total})` + (EVL.total > EVL.trials.length ? `, the newest ${EVL.trials.length} shown` : '');
   setHtml('ev-trials', !EVL.trials.length ? '<tr><td class="muted">No run has been evaluated yet.</td></tr>'
-    : '<tr><th>Started</th><th>Policy</th><th class="r">Time</th><th class="r" title="Counted live from the workspace camera; corrections made in Open are included.">Cubes placed</th><th class="r" title="Cubes placed in the first 3:00 of the run, the time the course counts. Only for runs of 3:00 or longer.">In first 3:00</th><th class="r" title="Run time divided by cubes placed.">Seconds per cube</th><th>Ended</th><th></th></tr>'
-    + EVL.trials.map(t => { const r = t.result || {}; return `<tr class="${t.id === evSel ? 'sel' : ''}"><td>${esc(t.started || t.id)}</td><td title="${esc(t.run)} / ${esc(t.ckpt)}">${evShort(t)}</td><td class="r">${mmss(t.duration_s)}</td><td class="r">${evCounting(t) ? '<span class="muted">counting…</span>' : '<b>' + (r.placed ?? '') + '</b>' + (evDiffer(t) ? ' <span class="tag-warn" title="The recount from the saved video gave another number: open the run">*</span>' : '')}</td><td class="r">${t.duration_s >= EV.graded_seconds && !evCounting(t) ? r.placed_180 : '–'}</td><td class="r">${r.seconds_per_cube ?? '–'}</td><td>${evEnd(t)}</td><td><button data-open="${esc(t.id)}">Open</button></td></tr>`; }).join(''));
+    : '<tr><th>Started</th><th>Policy</th><th class="r">Time</th><th class="r" title="Counted live from the workspace camera; corrections made in Open are included.">Cubes placed</th><th class="r" title="Cubes placed in the first 3:00 of the run, the time the course counts. Only for runs of 3:00 or longer.">In first 3:00</th><th class="r" title="Run time divided by cubes placed.">Seconds per cube</th><th>Ended</th><th title="Is this run on the Training machine? Set by Upload to the Training machine.">Uploaded</th><th></th></tr>'
+    + EVL.trials.map(t => { const r = t.result || {}; return `<tr class="${t.id === evSel ? 'sel' : ''}"><td>${esc(t.started || t.id)}</td><td title="${esc(t.run)} / ${esc(t.ckpt)}">${evShort(t)}</td><td class="r">${mmss(t.duration_s)}</td><td class="r">${evCounting(t) ? '<span class="muted">counting…</span>' : '<b>' + (r.placed ?? '') + '</b>' + (evDiffer(t) ? ' <span class="tag-warn" title="The recount from the saved video gave another number: open the run">*</span>' : '')}</td><td class="r">${t.duration_s >= EV.graded_seconds && !evCounting(t) ? r.placed_180 : '–'}</td><td class="r">${r.seconds_per_cube ?? '–'}</td><td>${evEnd(t)}</td><td>${evUp(t)}</td><td><button data-open="${esc(t.id)}">Open</button></td></tr>`; }).join(''));
+  renderUpload();
   renderReview();
 }
 $('ev-trials').addEventListener('click', e => { const b = e.target.closest('button[data-open]'); if (b) { evSel = b.dataset.open; evShown['ev-trials'] = ''; renderEvalLists(); $('ev-review').scrollIntoView({block: 'nearest'}); } });
@@ -1140,7 +1156,7 @@ function renderExtras(s) {
   const cams = ck.cameras || {};
   $('live-note').textContent = (cams.front_view || cams.wrist_view) ? '' : 'Cameras are off: they run with the station launch (section 2) or a policy launch (section 4).';
   const jr = s.procs.job;
-  pill($('job-pill'), jr.running ? (jr.stopping ? 'Stopping…' : (s.job_dataset === 'upload' ? 'Uploading…' : String(s.job_dataset || '').startsWith('clear ') ? `Clearing ${s.job_dataset.slice(6)}…` : `Processing ${s.job_dataset || ''}…`)) : (jr.exit_code != null && jr.exit_code !== 0 ? 'Last run had errors' : 'Idle'), jr.running ? 'warn busy' : (jr.exit_code != null && jr.exit_code !== 0 ? 'bad' : ''));
+  pill($('job-pill'), jr.running ? (jr.stopping ? 'Stopping…' : (s.job_dataset === 'upload' ? 'Uploading…' : s.job_dataset === 'eval upload' ? 'Uploading evaluated runs…' : String(s.job_dataset || '').startsWith('clear ') ? `Clearing ${s.job_dataset.slice(6)}…` : `Processing ${s.job_dataset || ''}…`)) : (jr.exit_code != null && jr.exit_code !== 0 ? 'Last run had errors' : 'Idle'), jr.running ? 'warn busy' : (jr.exit_code != null && jr.exit_code !== 0 ? 'bad' : ''));
   $('ds-process').disabled = jr.running || !$('ds-select').value;
   JOB_RUNNING = jr.running;
   const dSel = DS && DS.find(x => x.name === $('ds-select').value);
@@ -1151,7 +1167,9 @@ function renderExtras(s) {
   $('ds-upload').disabled = jr.running;
   $('ds-upload').title = s.hf_repo ? `Uploads to ${s.hf_repo}: raw and processed recordings that are not there yet, manifest.csv and the dataset version lists` : $('ds-upload').title;
   $('job-stop').disabled = !jr.running || jr.stopping;
-  if (renderExtras.jobWas && !jr.running) loadDatasets();
+  if (renderExtras.jobWas && !jr.running) { loadDatasets(); loadEval(); }
+  evUploading = jr.running && s.job_dataset === 'eval upload';
+  if (evHave) renderUpload();
   renderExtras.jobWas = jr.running;
   const cal = s.calibration || {};
   $('calib-info').textContent = cal.exists ? `Hand calibration file last written ${new Date(cal.written * 1000).toLocaleString()}.` : 'No hand calibration file: the hand will calibrate itself at the next launch start.';

@@ -5,16 +5,23 @@ Every live run of a policy (from Start policy to Stop policy in card 4) is recor
 views as video and every arm and hand signal APE receives. The cubes placed on the surface of their
 colour are counted live from the workspace camera (LiveTracker, eval_detect.py --live) and counted
 again from the saved video when the run has ended, as a check.
-One folder per run under <data>/eval/<run id>/:
+One folder per run, grouped by policy and checkpoint: <data>/eval/<policy run>/<checkpoint>/<run id>/, e.g.
+eval/Ampere_20261121-180315_s01_v1_act/best_model/20261125-114115/ (the same grouping as inference_logs/):
 
     trial.json            policy, placements found, result, automatic measures (the source of truth)
     signals.h5            one group per stream with t (seconds since the policy started) and data
-    oakd_front_view.mp4   10 frames per second; video time = trial time
-    oakd_wrist_view.mp4
+    oakd_front_view.mp4   10 frames per second; video time = trial time. Encoded while the run is recorded with the
+    oakd_wrist_view.mp4   video settings of the demo archive (H.264 4:4:4, CRF 12; VIDEO_ARGS below)
     <data>/eval/trials.csv   one row per run, rewritten after every change
 
+The run id is the time the run started and is unique over all policies. Runs saved before 2026-11-26 lie
+directly in <data>/eval/<run id>/; migrate() moves them (APE does that when it starts).
+
 This file has no ROS in it: server.py pushes samples and camera messages in through feed() and
-feed_frame(), so it can be tested without the robot (tests/test_eval.py).
+feed_frame(), so it can be tested without the robot (tests/test_eval.py, tests/test_eval_upload.py).
+
+    python eval_trials.py migrate <data>/eval    move runs of the old flat layout into the grouped one
+    python eval_trials.py csv <data>/eval        write trials.csv again from the trial.json files
 """
 import csv
 import json
@@ -42,9 +49,33 @@ END_REASONS = {
     "launch_stopped": "the policy launch ended",
     "stopped": "the policy stopped",
 }
+try:   # the video settings of the demo archive (src/logger/encode_archive.py), so both kinds of video are alike
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "logger"))
+    from video_archive_common import DEFAULT_VIDEO_ARGS as VIDEO_ARGS
+except Exception:   # APE copied without the rest of the repository
+    VIDEO_ARGS = ["-c:v", "libx264", "-preset", "medium", "-profile:v", "high444", "-pix_fmt", "yuv444p", "-crf", "12", "-g", "30"]
+finally:
+    sys.path.pop(0)
+VIDEO_ARGS = list(VIDEO_ARGS)
+if os.environ.get("APE_EVAL_VIDEO_PRESET"):   # e.g. veryfast: a third of the CPU time, about 1 dB lower quality
+    VIDEO_ARGS[VIDEO_ARGS.index("-preset") + 1] = os.environ["APE_EVAL_VIDEO_PRESET"]
+# What the page plays: browsers do not all play H.264 4:4:4, so a small 4:2:0 copy is made for the player (not uploaded)
+PREVIEW_ARGS = ["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"]
+NICE = ["nice", "-n", "10"] if shutil.which("nice") else []   # encoders never take the CPU from the policy
 TRIAL_ID = re.compile(r"^\d{8}-\d{6}(_\d+)?$")
 CSV_FIELDS = ["id", "started", "run", "ckpt", "algo", "dataset", "duration_s", "end_reason", "placed", "placed_180", "counted_live", "recounted",
-              "seconds_per_cube", "auto_still_s", "auto_hand_closings", "predict_ms", "dropped_steps", "note"]
+              "seconds_per_cube", "auto_still_s", "auto_hand_closings", "predict_ms", "dropped_steps", "note", "folder"]
+
+
+def _name(text, fallback):
+    """A folder name made from a policy run or checkpoint name."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(text or "")).strip("._")[:120] or fallback
+
+
+def trial_folder(trial):
+    """Where a run is kept, relative to <data>/eval: <policy run>/<checkpoint without folder and .pth>/<run id>."""
+    ckpt = Path(str(trial.get("ckpt") or "")).stem   # checkpoints/best_model.pth -> best_model
+    return f"{_name(trial.get('run'), 'unknown_policy')}/{_name(ckpt, 'unknown_checkpoint')}/{trial['id']}"
 
 
 class EvalError(Exception):
@@ -74,16 +105,15 @@ class VideoFile:
         self.proc = self.cv = self.size = self.first = None
         self.written = 0
         self.times, self.index = [], []   # arrival time and position in the video of every distinct frame
-        self.codec, self.error = "", ""
+        self.codec, self.error, self.args = "", "", None
 
     def _open(self, w, h, fmt):
         self.size = (w, h, fmt)
         if self.ffmpeg:
-            cmd = [self.ffmpeg, "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", fmt, "-s", f"{w}x{h}", "-r", str(self.fps),
-                   "-i", "-", "-an", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                   "-pix_fmt", "yuv420p", "-threads", "2", "-movflags", "+faststart", str(self.path)]
+            cmd = [*NICE, self.ffmpeg, "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", fmt, "-s", f"{w}x{h}", "-r", str(self.fps),
+                   "-i", "-", "-an", *VIDEO_ARGS, "-threads", "2", "-movflags", "+faststart", str(self.path)]
             self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            self.codec = "h264"
+            self.codec, self.args = "h264", VIDEO_ARGS
         else:   # plays in VLC, not in the browser
             import cv2
             self.cv = cv2.VideoWriter(str(self.path), cv2.VideoWriter_fourcc(*"mp4v"), self.fps, (w, h), fmt != "gray")
@@ -137,7 +167,7 @@ class VideoFile:
 
     def info(self):
         return {"file": self.path.name if self.written else None, "frames": len(self.times), "video_frames": self.written, "first_unix": self.first,
-                "fps": self.fps, "codec": self.codec, "size": list(self.size[:2]) if self.size else None, "error": self.error}
+                "fps": self.fps, "codec": self.codec, "video_args": self.args, "size": list(self.size[:2]) if self.size else None, "error": self.error}
 
 
 class Recorder:
@@ -400,8 +430,10 @@ class LiveTracker:
 class EvalTrials:
     """The run that is being recorded (at most one) and the saved ones."""
 
-    def __init__(self, folder, cams):
+    def __init__(self, folder, cams, previews=None):
         self.folder, self.cams = Path(folder), tuple(cams)
+        self.previews = Path(previews) if previews else self.folder.parent / "eval_previews"   # 4:2:0 copies for the page's player
+        self._preview_lock = threading.Lock()
         self.state = "idle"       # idle | starting | running | saving
         self.current = None
         self.rec = None
@@ -409,6 +441,20 @@ class EvalTrials:
         self.message = ""
         self._lock = threading.RLock()
         self._cache = {}
+        self._where = {}   # run id -> its folder
+
+    def _dir(self, trial_id):
+        """The folder of a run (grouped layout, or the old flat one), or None."""
+        if not TRIAL_ID.match(trial_id or ""):
+            return None
+        d = self._where.get(trial_id)
+        if d is not None and d.is_dir():
+            return d
+        for d in [*self.folder.glob(f"*/*/{trial_id}"), self.folder / trial_id]:
+            if d.is_dir():
+                self._where[trial_id] = d
+                return d
+        return None
 
     # -- data in (ROS thread) ---------------------------------------------------
     def feed(self, stream, values):
@@ -433,13 +479,15 @@ class EvalTrials:
                 raise EvalError("The previous run is still being saved.")
             base = time.strftime("%Y%m%d-%H%M%S")
             trial_id, n = base, 1
-            while (self.folder / trial_id).exists():
+            while self._dir(trial_id) is not None:
                 n += 1
                 trial_id = f"{base}_{n}"
-            folder = self.folder / trial_id
-            folder.mkdir(parents=True)
             self.current = {"id": trial_id, "started": time.strftime("%Y-%m-%d %H:%M:%S"), **meta,
                             "events": [], "asked": time.time(), "t0": None, "end_reason": None}
+            self.current["folder"] = trial_folder(self.current)
+            folder = self.folder / self.current["folder"]
+            folder.mkdir(parents=True)
+            self._where[trial_id] = folder
             self.rec = Recorder(folder, self.cams, find_ffmpeg())
             self.state, self.message = "starting", ""
             return trial_id
@@ -452,7 +500,14 @@ class EvalTrials:
             rec, trial = self.rec, self.current
             self.rec, self.current, self.state, self.message = None, None, "idle", message
         rec.close()
-        shutil.rmtree(self.folder / trial["id"], ignore_errors=True)   # created a moment ago by begin()
+        folder = self.folder / trial["folder"]
+        shutil.rmtree(folder, ignore_errors=True)   # created a moment ago by begin()
+        self._where.pop(trial["id"], None)
+        for parent in (folder.parent, folder.parent.parent):   # the policy's folders too, if this was its only run
+            try:
+                parent.rmdir()
+            except OSError:
+                break
 
     def started(self, t0, **extra):
         with self._lock:
@@ -476,7 +531,7 @@ class EvalTrials:
         t0, t_end = live["t0"], live["ended"]
         # the page keeps reading the live entry until the file is written, so the bookkeeping fields stay in it
         trial = {k: v for k, v in live.items() if k not in ("t0", "ended", "asked")}
-        folder = self.folder / trial["id"]
+        folder = self.folder / trial["folder"]
         try:
             rec.close()
             trial["duration_s"] = round(t_end - t0, 1)
@@ -515,12 +570,17 @@ class EvalTrials:
             with self._lock:
                 self.last_id, self.rec, self.current, self.state = trial["id"], None, None, "idle"
         self._detect(trial["id"])   # after the state is idle again: the next run can start meanwhile
+        for cam in self.cams:       # so that "Watch the videos" starts at once
+            try:
+                self.video(trial["id"], cam)
+            except EvalError:
+                pass
 
     def _detect(self, trial_id):
         """Count the placed cubes again from the saved workspace video, in a process of its own at low priority.
         The result is stored next to the live count; it becomes the count only if there was no live count."""
         try:
-            video = self.folder / trial_id / f"{self.cams[0]}.mp4"
+            video = self._dir(trial_id) / f"{self.cams[0]}.mp4"
             cmd = [sys.executable, str(Path(__file__).with_name("eval_detect.py")), "--json", str(video)]
             proc = subprocess.run((["nice", "-n", "10"] if shutil.which("nice") else []) + cmd, capture_output=True, text=True, timeout=3600)
             found = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.returncode == 0 and proc.stdout.strip() else {"placed": [], "problem": "the detection failed: " + proc.stderr.strip()[-300:]}
@@ -542,7 +602,7 @@ class EvalTrials:
             self.message = f"The placements of run {trial_id} could not be stored: {type(exc).__name__}: {exc}"
 
     def _write(self, trial):
-        f = self.folder / trial["id"] / "trial.json"
+        f = (self._dir(trial["id"]) or self.folder / trial.get("folder", trial["id"])) / "trial.json"
         tmp = f.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(trial, indent=1))
         tmp.replace(f)
@@ -552,26 +612,56 @@ class EvalTrials:
         out = []
         if not self.folder.is_dir():
             return out
-        for d in sorted(self.folder.iterdir(), reverse=True):
-            f = d / "trial.json"
-            if not TRIAL_ID.match(d.name) or not f.is_file():
-                continue
+        found = {}   # run id -> trial.json; the grouped layout first, then runs still in the old flat one
+        for f in [*self.folder.glob("*/*/*/trial.json"), *self.folder.glob("*/trial.json")]:
+            if TRIAL_ID.match(f.parent.name):
+                found.setdefault(f.parent.name, f)
+        for trial_id in sorted(found, reverse=True):
+            f = found[trial_id]
             try:
                 mtime = f.stat().st_mtime
-                if self._cache.get(d.name, (None,))[0] != mtime:
-                    self._cache[d.name] = (mtime, json.loads(f.read_text()))
-                out.append(self._cache[d.name][1])
+                if self._cache.get(trial_id, (None,))[:2] != (mtime, f):
+                    self._cache[trial_id] = (mtime, f, json.loads(f.read_text()))
+                self._where[trial_id] = f.parent
+                out.append(self._cache[trial_id][2])
             except (OSError, ValueError):
                 continue
         return out
 
     def get(self, trial_id):
-        if not TRIAL_ID.match(trial_id or ""):
+        d = self._dir(trial_id)
+        if d is None or not (d / "trial.json").is_file():
             raise EvalError("No such run.")
-        f = self.folder / trial_id / "trial.json"
-        if not f.is_file():
-            raise EvalError("No such run.")
-        return json.loads(f.read_text())
+        return json.loads((d / "trial.json").read_text())
+
+    def migrate(self):
+        """Move the runs of the old flat layout (<data>/eval/<run id>/) into <policy run>/<checkpoint>/<run id>/ and
+        note the place in their trial.json ("folder"). Only renames; a run whose new place is taken stays where it is.
+        Returns (moved, problems), each a list of texts."""
+        moved, problems = [], []
+        with self._lock:
+            flat = sorted(d for d in self.folder.iterdir() if TRIAL_ID.match(d.name) and (d / "trial.json").is_file()) if self.folder.is_dir() else []
+            for d in flat:
+                if self.current is not None and self.current["id"] == d.name:
+                    continue
+                try:
+                    trial = json.loads((d / "trial.json").read_text())
+                    trial["id"] = d.name
+                    trial["folder"] = trial_folder(trial)
+                    target = self.folder / trial["folder"]
+                    if target.exists():
+                        problems.append(f"{d.name}: not moved, {trial['folder']} exists already")
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    d.rename(target)
+                    self._where[d.name] = target
+                    self._write(trial)
+                    moved.append(trial["folder"])
+                except Exception as exc:
+                    problems.append(f"{d.name}: not moved, {type(exc).__name__}: {exc}")
+            if moved:
+                self.write_csv()
+        return moved, problems
 
     def update(self, trial_id, body):
         """Corrections after the run: note, and placements added or removed while watching the video."""
@@ -599,7 +689,9 @@ class EvalTrials:
         rows = []
         for t in sorted(self.trials(), key=lambda t: t["id"]):
             res, auto, timing = t.get("result") or {}, t.get("auto") or {}, t.get("timing") or {}
+            where = self._where.get(t["id"])
             row = {**{k: t.get(k, "") for k in CSV_FIELDS}, **{k: res.get(k, "") for k in ("placed", "placed_180", "seconds_per_cube")},
+                   "folder": where.relative_to(self.folder).as_posix() if where else t.get("folder", ""),
                    "counted_live": len(t["live"]["placed"]) if t.get("live") else "",
                    "recounted": len((t.get("detection") or {}).get("placed") or []) if (t.get("detection") or {}).get("state") == "done" else "",
                    "auto_still_s": auto.get("still_s", ""), "auto_hand_closings": auto.get("hand_closings", ""),
@@ -613,12 +705,37 @@ class EvalTrials:
         tmp.replace(self.folder / "trials.csv")
 
     def video(self, trial_id, cam):
-        if not TRIAL_ID.match(trial_id or "") or cam not in self.cams:
+        """The video file the page plays: the recording itself, or for a 4:4:4 recording a 4:2:0 copy of it, made on
+        first use in <previews>/<run id>/ (some browsers do not play H.264 4:4:4). The recording is never changed."""
+        d = self._dir(trial_id) if cam in self.cams else None
+        if d is None or not (d / f"{cam}.mp4").is_file():
             raise EvalError("No such video.")
-        f = self.folder / trial_id / f"{cam}.mp4"
-        if not f.is_file():
-            raise EvalError("No such video.")
-        return f
+        f = d / f"{cam}.mp4"
+        try:
+            args = (json.loads((d / "trial.json").read_text()).get("video", {}).get(cam) or {}).get("video_args") or []
+        except (OSError, ValueError):
+            args = []
+        if "yuv444p" not in args:
+            return f
+        copy = self.previews / trial_id / f"{cam}.mp4"
+        with self._preview_lock:
+            if copy.is_file() and copy.stat().st_mtime >= f.stat().st_mtime:
+                return copy
+            ffmpeg = find_ffmpeg()
+            if not ffmpeg:
+                return f
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            tmp = copy.with_suffix(".tmp.mp4")
+            cmd = [*NICE, ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", str(f), "-an", *PREVIEW_ARGS, "-threads", "2", "-movflags", "+faststart", str(tmp)]
+            try:
+                ok = subprocess.run(cmd, capture_output=True, timeout=600).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                ok = False
+            if not ok:
+                tmp.unlink(missing_ok=True)
+                return f
+            tmp.replace(copy)
+            return copy
 
     def info(self):
         """For the page, once per second."""
@@ -631,3 +748,27 @@ class EvalTrials:
                        "elapsed": round(elapsed, 1)}
             return {"state": self.state, "graded_seconds": GRADED_SECONDS, "kinds": EVENT_KINDS,
                     "end_reasons": END_REASONS, "current": cur, "last_id": self.last_id, "message": self.message, "folder": str(self.folder)}
+
+
+def main(argv=None):
+    import argparse
+
+    p = argparse.ArgumentParser(description="Tidy a folder of evaluated policy runs (no ROS needed).")
+    p.add_argument("action", choices=["migrate", "csv"], help="migrate: move runs of the old flat layout into "
+                   "<policy run>/<checkpoint>/<run id>/; csv: write trials.csv again from the trial.json files")
+    p.add_argument("folder", help="the eval folder, e.g. ~/rwr_humble_ws/data/eval")
+    args = p.parse_args(argv)
+    trials = EvalTrials(Path(args.folder).expanduser(), ())
+    if not trials.folder.is_dir():
+        raise SystemExit(f"{trials.folder} is not a folder")
+    if args.action == "migrate":
+        moved, problems = trials.migrate()
+        print("\n".join(["moved  " + m for m in moved] + ["PROBLEM  " + m for m in problems]))
+        print(f"{len(moved)} run(s) moved, {len(problems)} problem(s).")
+    trials.write_csv()
+    print(f"{trials.folder / 'trials.csv'}: {len(trials.trials())} run(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

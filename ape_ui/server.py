@@ -39,6 +39,7 @@ if sys_path_added not in sys.path:
 from station_data import CAMERAS, DataError, Station, archive_settings, rotate_for_display, safe
 from policy_checks import Policies, PolicyError
 from eval_trials import EvalError, EvalTrials, LiveTracker
+import eval_upload
 WORKSPACE = Path(os.environ.get("RWR_WS", Path.home() / "rwr_humble_ws"))
 DATA = WORKSPACE / "data"  # raw/<session>/, processed/<session>_10hz/, datasets/<version>/, manifest.csv
 RAW = DATA / "raw"
@@ -49,7 +50,14 @@ policies = Policies(WORKSPACE, DATA, POLICIES, station.hand_cfg_dir)
 INFERENCE_LOGS = WORKSPACE / "inference_logs"  # written by the inference node, relative to the launch directory
 POLICY_COMMAND_TOPIC = "/model_inference_command"
 # Evaluation of policy runs: one folder per run with the videos, the signals and trial.json (eval_trials.py)
-evals = EvalTrials(DATA / "eval", CAMERAS)
+evals = EvalTrials(DATA / "eval", CAMERAS, previews=WORKSPACE / "work" / "eval_previews")
+try:   # runs saved in the old flat layout move into <policy run>/<checkpoint>/<run id>/ (renames only)
+    _moved, _problems = evals.migrate()
+    if _moved or _problems:
+        print(f"Evaluated runs: {len(_moved)} moved into the folders of their policy and checkpoint."
+              + ("".join("\n  " + p for p in _problems)), flush=True)
+except Exception as exc:
+    print(f"Evaluated runs: the old folder layout could not be moved: {type(exc).__name__}: {exc}", flush=True)
 live = LiveTracker(CAMERAS[0])   # counts placed cubes from the workspace camera while a policy launch runs
 
 ROS_ENV = {"ROS_DOMAIN_ID": os.environ.get("APE_ROS_DOMAIN_ID", "7"), "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp"}
@@ -1399,7 +1407,7 @@ def status():
         "disk_free_gb": round(usage.free / 1e9, 1),
         "datasets_dir": str(RAW),
         "hf_repo": station.hf_repo(),
-        "features": ["lighting", "meta", "description", "orientation", "inference", "timing", "eval", "mover"],
+        "features": ["lighting", "meta", "description", "orientation", "inference", "timing", "eval", "mover", "eval_upload"],
         "eval": {**evals.info(), "live": live.info()},
         "time": time.time(),
     }
@@ -1755,7 +1763,26 @@ def _draw_tracking(img):
 @app.get("/api/eval")
 def eval_list():
     trials = evals.trials()
-    return {"trials": trials[:60], "total": len(trials), "folder": str(evals.folder)}
+    up = eval_upload.states(evals.folder, trials)   # is each run on the Training machine?
+    return {"trials": [{**t, "upload": up.get(t["id"], "no")} for t in trials[:60]], "total": len(trials), "folder": str(evals.folder),
+            "upload": {"host_set": bool(archive_settings()["host"]), "uploaded": sum(1 for v in up.values() if v == "uploaded"),
+                       "changed": sum(1 for v in up.values() if v == "changed"), "different": sum(1 for v in up.values() if v == "different"),
+                       "checked_at": eval_upload.read_status(evals.folder).get("checked_at", "")}}
+
+
+@app.post("/api/eval/upload")
+def eval_upload_start():
+    """Copy the evaluated runs to the Training machine and verify them there by checksum (eval_upload.py). Deletes nothing."""
+    if job.running:
+        raise HTTPException(409, "Another processing or upload job is still running (card 3).")
+    if inference.policy_on or evals.busy:
+        raise HTTPException(409, "Stop the policy first: the run being recorded is not complete, and uploading could make the policy stall.")
+    settings = archive_settings()
+    if not settings["host"]:
+        raise HTTPException(400, "No Training machine is set: add archive_host to static/local/station.json.")
+    job.dataset = "eval upload"
+    job.start([*BACKGROUND, *eval_upload.command(DATA, settings, WORKSPACE)], cwd=WORKSPACE)
+    return job.info()
 
 
 @app.post("/api/eval/trial/{trial_id}")

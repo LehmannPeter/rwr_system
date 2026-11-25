@@ -8,6 +8,7 @@ import sys, os, threading, time, json, math, types, urllib.request, urllib.error
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")); sys.argv = ["server.py", "--port", "8767"]
 import server as S
+import eval_trials; S.eval_trials_module = eval_trials
 assert os.environ.get("APE_INFERENCE_TEST_CMD"), "the mock inference command is required"
 S.external_launches = lambda own: []
 B = "http://127.0.0.1:8767"
@@ -103,12 +104,19 @@ def run():
                 tid = t["id"]; print("   message:", repr(ev()["message"]), "| video starts at", {c: v["starts_at_s"] for c, v in t["video"].items()}, "| robot at end", t["robot_mode_at_end"], "| still", t["auto"].get("still"))
                 print("   video:", {c: (v["frames"], v["video_frames"], v["codec"], v["size"], v["error"]) for c, v in t["video"].items()}, "| frames lost:", t["video_frames_lost"], "| problems:", t["recording_problems"])
                 import h5py, cv2
-                with h5py.File(S.evals.folder / tid / "signals.h5") as f:
+                with h5py.File(S.evals.folder / t["folder"] / "signals.h5") as f:
                     print("   h5:", {k: f[k]["data"].shape for k in f if k != "video"}, "| video frames", {c: len(f["video"][c]["t"]) for c in f["video"]})
+                probe = lambda path: (lambda c: (int(c.get(cv2.CAP_PROP_FRAME_COUNT)), c.read()[0]))(cv2.VideoCapture(str(path)))
+                copy = S.evals.video(tid, "oakd_wrist_view"); rec = S.evals.folder / t["folder"] / "oakd_wrist_view.mp4"
+                print("   recorded with the archive's video settings:", t["video"]["oakd_wrist_view"]["video_args"] == S.eval_trials_module.VIDEO_ARGS and "yuv444p" in t["video"]["oakd_wrist_view"]["video_args"],
+                      "| recording readable (frames, first frame):", probe(rec), "| the page gets a 4:2:0 copy outside data/eval:", copy != rec and S.evals.folder not in copy.parents, probe(copy))
                 print("   video endpoint:", urllib.request.urlopen(B + f"/api/eval/trial/{tid}/oakd_wrist_view.mp4").status, "| bad id ->", api("/api/eval/trial/..%2f..%2fx/oakd_wrist_view.mp4", post=False).get("ERR"))
                 n0 = t["result"]["placed"]; u = api(f"/api/eval/trial/{tid}", {"add": "placed", "t": 2.5}); u = api(f"/api/eval/trial/{tid}", {"add": "placed"}); u = api(f"/api/eval/trial/{tid}", {"remove": "placed"}); u = api(f"/api/eval/trial/{tid}", {"note": "checked on video"})
                 print("   after corrections (+2, -1):", u["result"]["placed"] - n0, "| sources", [e["source"] for e in u["events"]], "| note", u["note"], "| unknown kind ->", api(f"/api/eval/trial/{tid}", {"add": "dropped"}).get("ERR"))
         print("csv:"); print(open(S.evals.folder / "trials.csv").read())
+        t = api("/api/eval", post=False); want = f"{run_}/{ck.rsplit('/', 1)[-1].rsplit('.', 1)[0]}/{t['trials'][0]['id']}"
+        print("folder layout <policy run>/<checkpoint>/<run id>:", t["trials"][0]["folder"] == want and (S.evals.folder / want / "trial.json").is_file(), "| nothing left directly in eval/:", sorted(x.name for x in S.evals.folder.iterdir()) == sorted([run_, "trials.csv"]))
+        print("upload state per run:", {x["upload"] for x in t["trials"]}, "| summary:", t["upload"], "| upload without a Training machine ->", api("/api/eval/upload").get("ERR"))
         print("--- a live policy started outside the page is picked up")
         wait(lambda: not S.inference.running, 25); feeding["robot"] = "ready"; api("/api/inference/start", {"run": run_, "ckpt": ck, "preview": False, "override": True}); time.sleep(1.5)
         S.inference.write(b"start\n"); print("evaluating:", wait(lambda: ev()["state"] == "running")); time.sleep(1.5); S.inference.write(b"stop\n")
