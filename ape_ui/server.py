@@ -60,7 +60,10 @@ except Exception as exc:
     print(f"Evaluated runs: the old folder layout could not be moved: {type(exc).__name__}: {exc}", flush=True)
 live = LiveTracker(CAMERAS[0])   # counts placed cubes from the workspace camera while a policy launch runs
 
-ROS_ENV = {"ROS_DOMAIN_ID": os.environ.get("APE_ROS_DOMAIN_ID", "7"), "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp"}
+ROS_ENV = {"ROS_DOMAIN_ID": os.environ.get("APE_ROS_DOMAIN_ID", "7"), "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp",
+           # data unicast, multicast only for discovery: default multicast flooded the robot network with camera
+           # images (80 MB/s) and caused communication_constraints_violation reflexes (2026-11-26, see cyclonedds.xml)
+           "CYCLONEDDS_URI": os.environ.get("CYCLONEDDS_URI", "file://" + str(Path(__file__).resolve().parent / "cyclonedds.xml"))}
 SIDE = "right"
 START_POSE_FILE = Path(os.environ.get("APE_START_POSE_FILE", Path.home() / ".ros" / f"teleop_start_pose_{SIDE}.json"))
 MAX_MOVE_M = 0.80  # sanity limit for the smooth moves (they travel at about 10 cm/s)

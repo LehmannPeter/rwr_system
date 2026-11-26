@@ -87,7 +87,10 @@ Every terminal on the Robot PC:
 ```bash
 export ROS_DOMAIN_ID=7
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI=file://$HOME/Projects/rwr_system/ape_ui/cyclonedds.xml
 ```
+
+`CYCLONEDDS_URI` (since 2026-11-26) keeps the data unicast and uses multicast only for discovery. Without it, CycloneDDS sends the camera images for several readers on the Robot PC as multicast (about 80 MB/s on the wired robot network); the switch copies it to the NUC and the arm, and the arm stops with `communication_constraints_violation` reflexes. APE sets it for every ROS process it starts (`ape_ui/server.py`, `ROS_ENV`).
 
 1. **Franka Desk** (browser): release the stop button, unlock the brakes, activate FCI.
 2. **Arm controller** on the NUC: `cd multipanda_ros2 && ./run`, source the workspace, then `ros2 launch franka_bringup multimode_franka.launch.py robot_ip_1:=<FRANKA_IP>`. Verify with `ros2 topic info -v` on the two arm topics.
@@ -168,6 +171,8 @@ Images are sampled by nearest timestamp; poses are interpolated linearly with sl
 - Raw recordings hold uncompressed images and are large. `*.h5` is git-ignored.
 - The logger writes each raw file as `<name>.h5.part` and renames it to `.h5` when complete (since 2026-11-25), because APE's processing and upload jobs may run during a recording (at `nice 19`). Tools that read raw files must only take `*.h5`. A leftover `.h5.part` is a save that failed midway.
 - The keyboard runner's software pause holds the last targets. It is not an emergency stop.
+- After a Franka reflex, restarting the controller is not enough: it fails with "Robot is in command error state". Press and release the black stop button, then start the controller again.
+- `ape_ui/run.sh` must be started with its full path; a relative path makes it look for `server.py` in the workspace.
 - Language conditioning for the bonus subtask is not wired up. `keyboard_runner.py --prompt_task_description` publishes `/task_description`, but `datacollection_right.yaml` does not record it and the inference node passes no text to the policy.
 - Retargeter setting variants (fit2, fit4, fit4_thumb2, fit5), their backups and the offline comparison script are in `~/rwr_humble_ws/retargeter_fits/` on the Robot PC; which one is live is in `handoff/ROBOT_PC_STATE.md`.
 - The retargeter is tuned through `experiments/cfgs/retargeter/*.yaml` with `ros2 launch experiments retargeter_config_helper.launch.py` (hot reload needs `--symlink-install`). See `src/retargeter/README.md`.

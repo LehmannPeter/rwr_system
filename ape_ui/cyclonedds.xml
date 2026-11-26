@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CycloneDDS settings for every ROS process APE starts on the Robot PC (set as CYCLONEDDS_URI in server.py).
+
+  Multicast only for discovery (SPDP), data always unicast. With the default settings CycloneDDS sent the camera
+  images to the several readers on this PC (inference, APE, logger) as multicast: about 80 MB/s (640 Mbit/s) on the
+  wired robot network, measured 2026-11-26. The switch copies multicast to every port, so it also reached the NUC and
+  the arm, and the arm stopped with the reflex "communication_constraints_violation" again and again.
+  With unicast, data for readers on this PC stays on this PC; the NUC still finds us by multicast discovery.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain Id="any">
+    <General>
+      <AllowMulticast>spdp</AllowMulticast>
+    </General>
+  </Domain>
+</CycloneDDS>
