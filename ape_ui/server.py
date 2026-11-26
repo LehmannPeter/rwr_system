@@ -40,6 +40,7 @@ from station_data import CAMERAS, DataError, Station, archive_settings, rotate_f
 from policy_checks import Policies, PolicyError
 from eval_trials import EvalError, EvalTrials, LiveTracker
 import eval_upload
+from background import Background
 WORKSPACE = Path(os.environ.get("RWR_WS", Path.home() / "rwr_humble_ws"))
 DATA = WORKSPACE / "data"  # raw/<session>/, processed/<session>_10hz/, datasets/<version>/, manifest.csv
 RAW = DATA / "raw"
@@ -889,6 +890,7 @@ class Operate:
 
     def __init__(self):
         self.rec = "idle"  # idle | recording | review | saving
+        self.rec_starting = False
         self.rec_started = None
         self.rec_duration = None
         self.last_saved = None
@@ -1215,10 +1217,16 @@ class Operate:
         with self._lock:
             if self.rec != "idle":
                 raise ControlError("Save or discard the previous demo first." if self.rec == "review" else f"The logger is {self.rec}.")
-            ok, _ = monitor.call("rec_start")
-            if not ok:
-                raise ControlError("The logger refused to start (it may still be saving).")
-            self.rec, self.rec_started, self.rec_duration, self.message = "recording", time.time(), None, ""
+            self.rec_starting = True   # background encoding holds from here, before the logger starts
+            try:
+                if not os.environ.get("APE_ENCODE_WHILE_RECORDING") == "1":
+                    bg.suspend_now()
+                ok, _ = monitor.call("rec_start")
+                if not ok:
+                    raise ControlError("The logger refused to start (it may still be saving).")
+                self.rec, self.rec_started, self.rec_duration, self.message = "recording", time.time(), None, ""
+            finally:
+                self.rec_starting = False
         return ""
 
     def rec_stop(self):
@@ -1264,6 +1272,7 @@ class Operate:
             if self.rec != "review":
                 raise ControlError("There is no stopped demo to discard.")
             self.rec, self.message = "idle", "Demo discarded."
+        bg.wake()
         return ""
 
     def rec_save(self, labels=None):
@@ -1289,6 +1298,7 @@ class Operate:
                         problem = " ".join(p for p in (problem, station.write_meta(self.dataset, self.last_saved, labels or {}, extra)) if p)
                     if problem:
                         self.message += " " + problem
+                    bg.wake()   # encode it now
                 else:
                     self.message = "The logger could not save: no recording found."
             except ControlError as exc:
@@ -1342,13 +1352,43 @@ operate = Operate()
 nuc = NucSession()
 teleop = PtyProcess("teleop")
 recording = PtyProcess("recording")
-job = PtyProcess("job")  # processing and checking recorded demos
+job = PtyProcess("job")  # transfer and clear of recorded demos, evaluation upload
 # Processing and uploads run at the lowest CPU priority (inherited by every child), so they can run during a
 # recording: teleop, cameras and the logger always get the CPU first. ionice is not used: the NVMe disk has no
 # I/O scheduler ("none"), so it would do nothing. Uploads go out over wifi/VPN, not the robot's wired link.
 BACKGROUND = ["nice", "-n", "19"]
 job.dataset = None
 inference = InferenceProc()
+
+
+def _background_paused():
+    """Why the background encoder must not run now ("" = it may)."""
+    if inference.policy_on:
+        return "a policy is running"
+    if evals.busy:
+        return "an evaluation is being recorded"
+    return ""
+
+
+def _background_hold():
+    """Why the background task must wait right now ("" = it may run): a demo is being recorded, reviewed or saved."""
+    if os.environ.get("APE_ENCODE_WHILE_RECORDING") == "1":   # only for measuring the effect on stream gaps
+        return ""
+    return "a demo is being recorded" if operate.rec in ("recording", "review", "saving") or operate.rec_starting else ""
+
+
+def _start_transfer(dataset):
+    """Called by the background worker once its current task is done: archive what is missing, copy, verify."""
+    if job.running:
+        bg.request_transfer(dataset)   # try again when the other job ends
+        return
+    job.dataset = "transfer " + dataset
+    job.start([*BACKGROUND, *station.transfer_command(dataset)], cwd=WORKSPACE)
+
+
+# Encodes every new demo into its video archive as soon as it is saved, then checks its raw file (lowest priority).
+bg = Background(station, _background_paused, lambda: job.running, _start_transfer, WORKSPACE / "work" / "ape_background.log",
+                hold=_background_hold)
 # The arm teleop node on its own, so Move to center works without the station launch. Paused it publishes
 # nothing; it only sends arm targets during a move. Stopped before a station launch, which brings its own.
 mover = PtyProcess("mover")
@@ -1359,6 +1399,7 @@ monitor = None
 def cleanup():
     """Ctrl-C everything this page started and give it time to exit cleanly."""
     live.stop()
+    bg.stop()
     for p in (teleop, recording, inference, job):
         p.stop(grace=10)
     if nuc.state in ("launching", "running"):
@@ -1381,6 +1422,8 @@ async def lifespan(app):
     threading.Thread(target=operate.supervise, daemon=True).start()
     threading.Thread(target=policy_watch, daemon=True).start()
     threading.Thread(target=eval_watch, daemon=True).start()
+    (WORKSPACE / "work").mkdir(exist_ok=True)
+    bg.start()
     yield
     mover.stop(grace=3.0)
 
@@ -1410,7 +1453,8 @@ def status():
         "disk_free_gb": round(usage.free / 1e9, 1),
         "datasets_dir": str(RAW),
         "hf_repo": station.hf_repo(),
-        "features": ["lighting", "meta", "description", "orientation", "inference", "timing", "eval", "mover", "eval_upload"],
+        "features": ["lighting", "meta", "description", "orientation", "inference", "timing", "eval", "mover", "eval_upload", "background"],
+        "background": bg.info(),
         "eval": {**evals.info(), "live": live.info()},
         "time": time.time(),
     }
@@ -1927,24 +1971,27 @@ def hand_recalibrate():
 
 @app.get("/api/datasets")
 def datasets():
-    return {"datasets": station.list_datasets(), "job_running": job.running, "job_dataset": job.dataset,
-            "archive_host_set": bool(archive_settings()["host"]), "archive_require_hf": archive_settings()["require_hf_backup"]}
+    return {"datasets": station.list_datasets(bg.info()), "job_running": job.running, "job_dataset": job.dataset,
+            "background": bg.info(), "archive_host_set": bool(archive_settings()["host"]),
+            "archive_require_hf": archive_settings()["require_hf_backup"]}
 
 
-@app.post("/api/datasets/{dataset}/process")
-def dataset_process(dataset: str):
-    if job.running:
-        raise HTTPException(409, "Another processing job is still running.")
-    if inference.policy_on or evals.busy:
-        raise HTTPException(409, "Stop the policy first: processing is heavy and would make the policy stall.")
+@app.post("/api/datasets/{dataset}/transfer")
+def dataset_transfer(dataset: str):
+    """Transfer new demos: once the background encoder has finished its current demo, archive_job.py encodes what is
+    still missing, copies the archives and manifest.csv to the Training machine and verifies them there."""
     try:
-        script, prev = station.process_command(dataset)
+        safe(dataset)
     except DataError as exc:
         raise HTTPException(400, str(exc))
-    prev.mkdir(parents=True, exist_ok=True)
-    job.dataset = dataset
-    job.start([*BACKGROUND, "bash", "-c", script], cwd=WORKSPACE, env=ROS_ENV)
-    return job.info()
+    if not (station.raw / dataset).is_dir() and not (station.data / "archive" / dataset).is_dir():
+        raise HTTPException(400, "This session has no recordings on this PC.")
+    if job.dataset == "transfer " + dataset and job.running:
+        raise HTTPException(409, "This session is being transferred right now.")
+    bg.request_transfer(dataset)
+    reason = _background_paused()
+    return {"queued": True, "note": f"The transfer starts when {reason.replace('is running', 'stops').replace('is being recorded', 'is saved')}." if reason
+            else "The transfer starts after the other job in card 3." if job.running else ""}
 
 
 @app.post("/api/datasets/{dataset}/clear")
@@ -1963,20 +2010,6 @@ def dataset_clear(dataset: str):
         raise HTTPException(400, str(exc))
     job.dataset = "clear " + dataset
     job.start(cmd, cwd=WORKSPACE)
-    return job.info()
-
-
-@app.post("/api/upload")
-def upload_start():
-    """Upload raw and processed recordings, the manifest and the dataset version lists to Hugging Face."""
-    if job.running:
-        raise HTTPException(409, "Another processing or upload job is still running.")
-    if inference.policy_on:
-        raise HTTPException(409, "Stop the policy first: uploading could make the policy stall.")
-    if not station.hf_repo():
-        raise HTTPException(400, "No Hugging Face repo is set yet. Run once in a terminal: python " + str(station.tool) + " push --repo <user>/<name>")
-    job.dataset = "upload"
-    job.start([*BACKGROUND, *station.upload_command()], cwd=WORKSPACE)
     return job.info()
 
 

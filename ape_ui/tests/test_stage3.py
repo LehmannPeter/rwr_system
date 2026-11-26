@@ -1,4 +1,4 @@
-"""Live data, cameras, processing job and demo player against mock_station.py (test domain only).
+"""Live data, cameras, background encoding and check, transfer job and demo player against mock_station.py (test domain only).
 Expects the synthetic recording in $RWR_WS/data/raw/syn_test/ (before 2026-11-21: $RWR_WS/datasets/syn_test/)."""
 import sys, os, threading, time, json, urllib.request, urllib.error, subprocess
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")); sys.argv = ["server.py", "--port", "8766"]
@@ -22,20 +22,24 @@ def run():
         j = get("/api/cam/oakd_front_view.jpg", raw=True); print("camera jpeg:", len(j), "bytes", j[:3] == b"\xff\xd8\xff")
         print("bad camera ->", get("/api/cam/nope.jpg").get("ERR"))
         cpu = subprocess.run(["ps", "-o", "%cpu=", "-p", str(os.getpid())], capture_output=True, text=True).stdout.strip(); print("server cpu % (average since start):", cpu)
-        ds = get("/api/datasets")["datasets"]; print("datasets:", [(d["name"], len(d["demos"]), d["todo"]) for d in ds])
-        print("process ->", post("/api/datasets/syn_test/process").get("running"))
-        print("second job refused ->", post("/api/datasets/syn_test/process").get("ERR"))
+        ds = get("/api/datasets")["datasets"]; print("datasets:", [(d["name"], len(d["demos"]), d["to_encode"], d["to_check"]) for d in ds])
+        for _ in range(240):   # the background worker encodes, then checks the raw file
+            time.sleep(0.5)
+            d = get("/api/datasets")["datasets"][0]
+            if not d["to_encode"] and not d["to_check"]: break
+        print("encoded and checked in the background:", not d["to_encode"] and not d["to_check"])
+        print("transfer ->", post("/api/datasets/syn_test/transfer"))
         for _ in range(120):
             time.sleep(0.5)
-            if not get("/api/status")["procs"]["job"]["running"]: break
-        print("job exit:", get("/api/status")["procs"]["job"]["exit_code"])
+            if not get("/api/status")["procs"]["job"]["running"] and not S.bg.wanted: break
+        print("job exit (archived only, no Training machine set):", get("/api/status")["procs"]["job"]["exit_code"])
         d = get("/api/datasets")["datasets"][0]["demos"][0]; print("after job:", d)
         m = get("/api/demo/syn_test/20270101_120000/meta"); print("meta:", m["frames"], m["freq"], m["cameras"])
         f = get("/api/demo/syn_test/20270101_120000/frame/5.jpg", raw=True); print("frame jpeg:", len(f), f[:3] == b"\xff\xd8\xff")
         print("plot:", len(get("/api/demo/syn_test/20270101_120000/trajectory.png", raw=True)), "bytes")
         print("path trick ->", get("/api/demo/..%2f..%2fetc/passwd/meta").get("ERR"))
         print("recalibrate while hand runs ->", post("/api/hand/recalibrate").get("detail"))
-        print("process again (nothing to do) ->", post("/api/datasets/syn_test/process").get("running")); time.sleep(6)
+        print("transfer again (nothing to do) ->", post("/api/datasets/syn_test/transfer")); time.sleep(6)
         print("job exit:", get("/api/status")["procs"]["job"]["exit_code"])
         open(os.environ["MOCK_DIR"] + "/ready", "w").close(); time.sleep(float(os.environ.get("HOLD", "0")))
     except Exception:

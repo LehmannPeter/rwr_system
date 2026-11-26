@@ -121,6 +121,7 @@ td.t-ok { background: var(--ok-bg); color: var(--ok); font-weight: 600; } td.t-w
 .finger { display: grid; grid-template-columns: 56px 1fr 44px; gap: 8px; align-items: center; font-size: 13px; }
 .bar { position: relative; height: 16px; background: var(--idle-bg); border-radius: 4px; overflow: hidden; }
 .bar .m { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: 4px; }
+.bar.thin { height: 8px; min-width: 70px; display: inline-block; vertical-align: middle; }
 .bar .c { position: absolute; top: -2px; bottom: -2px; width: 3px; background: var(--ink); border-radius: 2px; }
 .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 10px; }
 .num { font-variant-numeric: tabular-nums; }
@@ -391,9 +392,8 @@ input[type=range] { width: 100%; }
       <div class="row"><h2>3 · Recorded demos</h2><span class="pill" id="job-pill">Idle</span></div>
       <div class="row">
         <label>Session <select id="ds-select"></select></label>
-        <button class="primary" id="ds-process">Process and check new demos</button>
-        <button class="danger" id="ds-clear" title="Deletes the raw, processed and archive files of this session's demos that are copied to the Training machine and match there byte for byte (checked again right before deleting). The demo settings files and manifest.csv stay.">Clear transferred demos</button>
-        <button id="ds-upload" title="Uploads all raw and processed recordings that are not on Hugging Face yet, plus manifest.csv and the dataset version lists">Upload to Hugging Face</button>
+        <button class="primary" id="ds-process" title="Copies this session's demos to the Training machine and verifies them there. Each demo is encoded into its video archive in the background as soon as it is saved; anything not encoded yet is encoded first.">Transfer new demos</button>
+        <button class="danger" id="ds-clear" title="Deletes the raw recordings of this session's demos whose archive is on the Training machine and matches there byte for byte (checked again right before deleting). The video archives (for View), the demo settings files and manifest.csv stay.">Clear transferred demos</button>
         <button class="danger" id="job-stop">Stop</button>
       </div>
     </div>
@@ -406,7 +406,7 @@ input[type=range] { width: 100%; }
       <div id="pl-check"></div>
       <details class="panel"><summary>Trajectory plot</summary><img id="pl-plot" alt="Arm and hand trajectory plot" style="aspect-ratio:auto"></details>
     </div>
-    <details id="job-details"><summary>Processing and upload log</summary><div class="term small" id="term-job"></div></details>
+    <details id="job-details"><summary>Transfer and clear log</summary><div class="term small" id="term-job"></div></details>
   </section>
   </div>
   </div>
@@ -487,7 +487,7 @@ for (const n of ['nuc', 'recording', 'job', 'inference']) {
 
 /* ---------- actions ---------- */
 /* ---------- session name: s<number>_<date>_<operator> ---------- */
-let DS = [], sesChecked = false, ARCHIVE_HOST_SET = false, ARCHIVE_REQUIRE_HF = true, JOB_RUNNING = false;
+let DS = [], BG = {}, JOB_DS = '', sesChecked = false, ARCHIVE_HOST_SET = false, ARCHIVE_REQUIRE_HF = true, JOB_RUNNING = false;
 const today = () => { const d = new Date(), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
 const sesNumber = name => { const m = /^s(\d+)_/.exec(name); return m ? parseInt(m[1], 10) : null; };
 const nextSesNo = () => Math.max(0, ...DS.map(d => sesNumber(d.name)).filter(n => n != null)) + 1;
@@ -769,7 +769,7 @@ let PL = null;
 const STREAMS = {arm_state: 'Arm state (Franka)', arm_pose: 'Arm pose', arm_cmd: 'Arm commands', hand: 'Hand joints (measured)', hand_cmd: 'Hand commands', hand_current: 'Hand motor current', hand_temp: 'Hand motor temperature', glove: 'Glove (right wrist)', oakd_front_view: 'Workspace camera', oakd_wrist_view: 'Wrist camera'};
 async function loadDatasets() {
   try {
-    const r = await (await fetch('/api/datasets', {cache: 'no-store'})).json(); DS = r.datasets; ARCHIVE_HOST_SET = !!r.archive_host_set; ARCHIVE_REQUIRE_HF = r.archive_require_hf !== false;
+    const r = await (await fetch('/api/datasets', {cache: 'no-store'})).json(); DS = r.datasets; BG = r.background || {}; JOB_DS = r.job_running ? (r.job_dataset || '') : ''; ARCHIVE_HOST_SET = !!r.archive_host_set; ARCHIVE_REQUIRE_HF = r.archive_require_hf !== false;
     if (!sesChecked) { sesChecked = true; if (!(parseInt($('ses-no').value, 10) > 0) || sessionClash()) { $('ses-no').value = nextSesNo(); saveSession(); } }   // first load: never start on a number another session owns
     updateSession();
     const sel = $('ds-select'), cur = sel.value || (() => { try { return localStorage.getItem('ds') || ''; } catch (e) { return ''; } })();
@@ -778,32 +778,53 @@ async function loadDatasets() {
     renderDemos();
   } catch (e) {}
 }
+function demoProgress(m, copying) {   // 0..1 for the overall bar: encoded = 0.8, verified on the Training machine = 1
+  const a = m.archive, w = m.work;
+  if (a && ['verified', 'cleared'].includes(a.state)) return 1;
+  if (w && w.task === 'encode') return 0.8 * (w.pct || 0) / 100;
+  if (w && w.task === 'wait_encode') return 0;
+  return a && a.state !== 'archive_failed' ? (copying ? 0.85 : 0.8) : 0;
+}
+const pbar = (pct, text) => `<span class="bar thin" title="${esc(text)}"><span class="m" style="width:${Math.max(0, Math.min(100, pct))}%"></span></span> <span class="muted">${esc(text)}</span>`;
 function renderDemos() {
   const d = DS.find(x => x.name === $('ds-select').value);
   if (!d) { $('demo-table').innerHTML = ''; $('ds-info').textContent = 'No recordings yet.'; $('ds-process').disabled = true; return; }
+  const copying = JOB_DS === 'transfer ' + d.name, queued = (BG.transfer_wanted || []).includes(d.name);
   const notCopied = d.demos.filter(m => !m.archive || !['verified', 'cleared'].includes(m.archive.state)).length;
-  $('ds-info').innerHTML = `${d.demos.length} demo${d.demos.length === 1 ? '' : 's'}, ${d.total_gb} GB on disk. ${d.todo ? `<b>${d.todo}</b> not processed or not checked yet.` : 'All processed and checked.'} `
+  const total = d.demos.length ? d.demos.reduce((s, m) => s + demoProgress(m, copying), 0) / d.demos.length : 1;
+  const work = d.to_encode ? `<b>${d.to_encode}</b> to encode. ` : '';
+  const checks = d.to_check ? `${d.to_check} not checked yet (runs in the background after encoding). ` : '';
+  const state = copying ? 'Transferring now. ' : queued ? 'Transfer asked for: it starts after the demo being encoded. ' : '';
+  const paused = BG.note && BG.note.startsWith('paused') ? `<span class="tag-warn">Background encoding ${esc(BG.note)}.</span> ` : '';
+  $('ds-info').innerHTML = (notCopied && ARCHIVE_HOST_SET ? `<div style="margin-bottom:6px">${pbar(100 * total, `${d.demos.length - notCopied} of ${d.demos.length} on the Training machine`)}</div>` : '')
+    + `${d.demos.length} demo${d.demos.length === 1 ? '' : 's'}, ${d.total_gb} GB on disk. ${state}${paused}${work}${checks}`
     + (ARCHIVE_HOST_SET ? `${notCopied ? `<b>${notCopied}</b> not yet verified on the Training machine.` : 'All verified on the Training machine.'} ${d.clearable ? `${d.clearable} verified` + (ARCHIVE_REQUIRE_HF ? `, ${d.clearable_hf} of them also backed up on Hugging Face at the last check (clearing needs both; it checks again)` : '') + ` (${d.clearable_gb} GB).` : ''} ` : 'No Training machine set (<code>archive_host</code> in <code>static/local/station.json</code>): demos are archived but not copied. ')
     + `Training reads a dataset version built from <code>manifest.csv</code>, not this folder.`;
   $('ds-clear').disabled = !ARCHIVE_HOST_SET || !d.clearable || JOB_RUNNING;
-  let h = '<tr><th>Demo</th><th>Name in dataset versions</th><th>Colour</th><th class="r">Raw GB</th><th class="r">Processed GB</th><th class="r">Length</th><th class="r">Frames</th><th>Check</th><th>Archive / Training machine</th><th></th></tr>';
-  const ARC = {archived: ['muted', 'archived'], archive_failed: ['tag-bad', 'archive failed'], not_verified: ['tag-warn', 'not verified'], verified: ['tag-ok', 'verified'], verified_hf: ['tag-ok', 'verified + HF'], cleared: ['tag-ok', 'cleared here']};
+  let h = '<tr><th>Demo</th><th>Name in dataset versions</th><th>Colour</th><th class="r">Raw GB</th><th class="r">Length</th><th class="r">Frames</th><th>Check</th><th>Archive / Training machine</th><th></th></tr>';
+  const ARC = {archived: ['muted', 'encoded'], archive_failed: ['tag-bad', 'encoding failed'], not_verified: ['tag-warn', 'not verified'], verified: ['tag-ok', 'verified'], verified_hf: ['tag-ok', 'verified + HF'], cleared: ['tag-ok', 'cleared here']};
   for (const m of [...d.demos].reverse()) {
-    const c = m.check, a = m.archive;
-    const chk = a && a.state === 'cleared' ? '<span class="muted">–</span>' : m.processed_gb == null ? '<span class="muted">not processed</span>' : !c ? '<span class="muted">not checked</span>' : c.ok ? '<span class="tag-ok">ok</span>' : `<span class="tag-bad" title="${esc(c.errors.join('\n'))}">problems: ${esc(c.errors[0] || '')}</span>`;
-    const arc = !a ? '<span class="muted">not archived</span>' : `<span class="${ARC[a.state === 'verified' && a.hf ? 'verified_hf' : a.state][0]}" title="${esc(a.text)}">${ARC[a.state === 'verified' && a.hf ? 'verified_hf' : a.state][1]}</span>${a.archive_mb != null ? ' <span class="muted">' + a.archive_mb + ' MB</span>' : ''}`;
-    h += `<tr class="${PL && PL.demo === m.name && PL.dataset === d.name ? 'sel' : ''}"><td title="${esc(m.description || '')}">${esc(m.name)}${m.description ? ' <span class="muted" title="' + esc(m.description) + '">✎</span>' : ''}</td><td>${m.dataset_name ? esc(m.dataset_name) : '<span class="muted">–</span>'}</td><td>${m.colour ? esc(m.colour) : '<span class="muted">–</span>'}${m.keep && m.keep !== 'keep' ? ' <span class="muted">(' + esc(m.keep) + ')</span>' : ''}</td><td class="r">${m.raw_gb == null ? '–' : m.raw_gb.toFixed(2)}</td><td class="r">${m.processed_gb == null ? '–' : m.processed_gb.toFixed(2)}</td><td class="r">${c && c.duration_s != null ? mmss(c.duration_s) : '–'}</td><td class="r">${c && c.frames != null ? c.frames : '–'}</td><td>${chk}</td><td>${arc}</td><td class="r">${m.processed_gb != null ? `<button data-demo="${esc(m.name)}">View</button>` : ''}</td></tr>`;
+    const c = m.check, a = m.archive, w = m.work;
+    const chk = c ? (c.ok ? '<span class="tag-ok">ok</span>' : `<span class="tag-bad" title="${esc(c.errors.join('\n'))}">problems: ${esc(c.errors[0] || '')}</span>`)
+      : w && w.task === 'check' ? '<span class="muted">checking…</span>' : m.raw_gb != null ? '<span class="muted">waiting</span>' : '<span class="muted">–</span>';
+    const key = a ? (a.state === 'verified' && a.hf ? 'verified_hf' : a.state) : '';
+    const arc = w && w.task === 'encode' ? pbar(w.pct || 0, `encoding ${w.pct || 0} %`)
+      : w && w.task === 'wait_encode' ? '<span class="muted">waiting to encode</span>'
+      : copying && a && ['archived', 'not_verified'].includes(a.state) ? '<span class="muted">copying…</span>'
+      : !a ? '<span class="muted">not encoded</span>'
+      : `<span class="${ARC[key][0]}" title="${esc(a.text)}">${ARC[key][1]}</span>${a.archive_mb != null ? ' <span class="muted">' + a.archive_mb + ' MB</span>' : ''}`;
+    h += `<tr class="${PL && PL.demo === m.name && PL.dataset === d.name ? 'sel' : ''}"><td title="${esc(m.description || '')}">${esc(m.name)}${m.description ? ' <span class="muted" title="' + esc(m.description) + '">✎</span>' : ''}</td><td>${m.dataset_name ? esc(m.dataset_name) : '<span class="muted">–</span>'}</td><td>${m.colour ? esc(m.colour) : '<span class="muted">–</span>'}${m.keep && m.keep !== 'keep' ? ' <span class="muted">(' + esc(m.keep) + ')</span>' : ''}</td><td class="r">${m.raw_gb == null ? '–' : m.raw_gb.toFixed(2)}</td><td class="r">${c && c.duration_s != null ? mmss(c.duration_s) : '–'}</td><td class="r">${c && c.frames != null ? c.frames : '–'}</td><td>${chk}</td><td>${arc}</td><td class="r">${m.viewable ? `<button data-demo="${esc(m.name)}" title="${m.raw_gb != null ? 'Plays the raw recording' : 'Plays the video archive (the raw recording is cleared)'}">View</button>` : ''}</td></tr>`;
   }
   $('demo-table').innerHTML = h;
   for (const b of $('demo-table').querySelectorAll('button')) b.onclick = () => openDemo(d.name, b.dataset.demo);
+  $('ds-process').disabled = copying || queued;
 }
 $('ds-select').onchange = () => { try { localStorage.setItem('ds', $('ds-select').value); } catch (e) {} renderDemos(); };
-$('ds-upload').onclick = async () => { $('job-details').open = true; await post('/api/upload'); };
-$('ds-process').onclick = async () => { const n = $('ds-select').value; if (!n) return; $('job-details').open = true; await post(`/api/datasets/${encodeURIComponent(n)}/process`); loadDatasets(); };
+$('ds-process').onclick = async () => { const n = $('ds-select').value; if (!n) return; $('job-details').open = true; const r = await post(`/api/datasets/${encodeURIComponent(n)}/transfer`); if (r && r.note) toast(r.note, true); loadDatasets(); };
 $('job-stop').onclick = () => post('/api/job/stop');
 $('ds-clear').onclick = async () => {
   const d = DS.find(x => x.name === $('ds-select').value); if (!d || !d.clearable) return;
-  if (!confirm(`Delete ${d.clearable} demo(s) of ${d.name} from this PC (${d.clearable_gb} GB of raw and processed files, plus their archive copies)?\n\nOnly demos whose files are on the Training machine and match byte for byte${ARCHIVE_REQUIRE_HF ? ', and whose archive is backed up on Hugging Face,' : ''} are deleted; this is checked again right before deleting. The demo settings files and manifest.csv stay. This cannot be undone on this PC.`)) return;
+  if (!confirm(`Delete the raw recordings of ${d.clearable} demo(s) of ${d.name} from this PC (${d.clearable_gb} GB)?\n\nOnly demos whose files are on the Training machine and match byte for byte${ARCHIVE_REQUIRE_HF ? ', and whose archive is backed up on Hugging Face,' : ''} are deleted; this is checked again right before deleting. The video archives (about 15 MB per demo, for View), the demo settings files and manifest.csv stay. This cannot be undone on this PC.`)) return;
   $('job-details').open = true; await post(`/api/datasets/${encodeURIComponent(d.name)}/clear`); loadDatasets();
 };
 async function openDemo(dataset, demo) {
@@ -812,7 +833,8 @@ async function openDemo(dataset, demo) {
   PL = {dataset, demo, meta, i: 0, timer: null, busy: false};
   $('player').style.display = ''; $('pl-title').textContent = `${dataset} / ${demo}`; $('pl-seek').max = Math.max(0, meta.frames - 1); $('pl-seek').value = 0;
   const d = DS.find(x => x.name === dataset), m = d && d.demos.find(x => x.name === demo), c = m && m.check;
-  $('pl-check').innerHTML = !c ? '<div class="note warn">Not checked yet. Press "Process and check new demos".</div>' : c.ok ? '' : `<div class="note bad"><b>The check found problems:</b><br>${c.errors.map(esc).join('<br>')}</div>`;
+  $('pl-title').textContent += meta.source === 'archive' ? ' (from the video archive)' : '';
+  $('pl-check').innerHTML = !c ? '<div class="note warn">Not checked yet: the check runs in the background after the demo is encoded.</div>' : c.ok ? '' : `<div class="note bad"><b>The check found problems:</b><br>${c.errors.map(esc).join('<br>')}</div>`;
   const plot = $('pl-plot'); plot.style.display = c ? '' : 'none'; if (c) plot.src = `/api/demo/${encodeURIComponent(dataset)}/${encodeURIComponent(demo)}/trajectory.png`;
   showFrame(0); renderDemos(); $('player').scrollIntoView({behavior: 'smooth', block: 'nearest'});
 }
@@ -840,7 +862,10 @@ loadDatasets().then(() => {   // optional link parameters: ?open=all opens the d
   if (q.get('open') === 'all') for (const id of ['d-hand', 'd-arm', 'd-other']) $(id).open = true;
   const dm = (q.get('demo') || '').split('/'); if (dm.length === 2) { $('ds-select').value = dm[0]; renderDemos(); openDemo(dm[0], dm[1]); }
 });
-setInterval(() => { if (!document.hidden) loadDatasets(); }, 5000);
+(function pollDatasets() {   // every 2 s while something is being encoded, checked or copied, else every 5 s
+  const active = JOB_DS || (BG && BG.task) || (DS || []).some(d => d.to_encode);
+  setTimeout(async () => { if (!document.hidden) await loadDatasets(); pollDatasets(); }, active ? 2000 : 5000);
+})();
 
 /* ---------- run a policy ---------- */
 let POL = {runs: [], folder: ''}, PCHK = null, INF = null, polHave = false, polBusy = false, polRobot = null, polShown = '', polStatus = null;
@@ -1156,16 +1181,13 @@ function renderExtras(s) {
   const cams = ck.cameras || {};
   $('live-note').textContent = (cams.front_view || cams.wrist_view) ? '' : 'Cameras are off: they run with the station launch (section 2) or a policy launch (section 4).';
   const jr = s.procs.job;
-  pill($('job-pill'), jr.running ? (jr.stopping ? 'Stopping…' : (s.job_dataset === 'upload' ? 'Uploading…' : s.job_dataset === 'eval upload' ? 'Uploading evaluated runs…' : String(s.job_dataset || '').startsWith('clear ') ? `Clearing ${s.job_dataset.slice(6)}…` : `Processing ${s.job_dataset || ''}…`)) : (jr.exit_code != null && jr.exit_code !== 0 ? 'Last run had errors' : 'Idle'), jr.running ? 'warn busy' : (jr.exit_code != null && jr.exit_code !== 0 ? 'bad' : ''));
-  $('ds-process').disabled = jr.running || !$('ds-select').value;
+  pill($('job-pill'), jr.running ? (jr.stopping ? 'Stopping…' : (s.job_dataset === 'eval upload' ? 'Uploading evaluated runs…' : String(s.job_dataset || '').startsWith('clear ') ? `Clearing ${s.job_dataset.slice(6)}…` : String(s.job_dataset || '').startsWith('transfer ') ? `Transferring ${s.job_dataset.slice(9)}…` : `${s.job_dataset || 'Job'}…`)) : (jr.exit_code != null && jr.exit_code !== 0 ? 'Last run had errors' : 'Idle'), jr.running ? 'warn busy' : (jr.exit_code != null && jr.exit_code !== 0 ? 'bad' : ''));
   JOB_RUNNING = jr.running;
   const dSel = DS && DS.find(x => x.name === $('ds-select').value);
   $('ds-clear').disabled = !ARCHIVE_HOST_SET || !dSel || !dSel.clearable || jr.running || ['recording', 'saving', 'review'].includes(o.rec);
   const ft = s.features || [];
   $('lb-note').innerHTML = ft.includes('orientation') ? '' : `<div class="note warn" style="margin-top:8px">Restart APE to store ${ft.includes('description') ? 'the cube orientation' : ft.includes('meta') ? 'the cube orientation and the description' : 'the lighting label, the cube orientation, the description and the settings file of each demo'}. Until then it is not saved.</div>`;
   showPreview();
-  $('ds-upload').disabled = jr.running;
-  $('ds-upload').title = s.hf_repo ? `Uploads to ${s.hf_repo}: raw and processed recordings that are not there yet, manifest.csv and the dataset version lists` : $('ds-upload').title;
   $('job-stop').disabled = !jr.running || jr.stopping;
   if (renderExtras.jobWas && !jr.running) { loadDatasets(); loadEval(); }
   evUploading = jr.running && s.job_dataset === 'eval upload';

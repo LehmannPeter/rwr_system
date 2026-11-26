@@ -39,7 +39,37 @@ def _copy_attrs(src, dst):
         dst.attrs[k] = v
 
 
-def _encode_topic(ffmpeg, group, names, video_path, fps, threads, video_args):
+class Progress:
+    """<out>/.<stem>.progress.json while a recording is encoded: {"done": frames, "total": frames, "stage": ...}.
+    APE shows it in the demo list. A dot file, so rsync and the archive tools ignore it; removed at the end."""
+
+    def __init__(self, path, total):
+        self.path, self.total, self.done, self.last = Path(path), max(1, int(total)), 0, 0.0
+        self.write("starting", force=True)
+
+    def step(self, stage, n=1):
+        self.done += n
+        self.write(stage)
+
+    def write(self, stage, force=False):
+        if not force and time.time() - self.last < 0.5:
+            return
+        self.last = time.time()
+        try:
+            write_json_atomic(self.path, {"stage": stage, "done": self.done, "total": self.total, "pid": os.getpid(),
+                                          "updated": round(self.last, 1)})
+        except OSError:
+            pass
+
+    def remove(self):
+        for f in (self.path, Path(str(self.path) + ".tmp")):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+
+def _encode_topic(ffmpeg, group, names, video_path, fps, threads, video_args, progress=None):
     """Pipe the frames of one camera topic into ffmpeg, one frame at a time (low memory)."""
     h, w, _ = group[names[0]].shape
     cmd = [ffmpeg, "-nostdin", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
@@ -49,6 +79,8 @@ def _encode_topic(ffmpeg, group, names, video_path, fps, threads, video_args):
     try:
         for name in names:
             proc.stdin.write(np.ascontiguousarray(group[name][()]).tobytes())
+            if progress:
+                progress.step("encoding")
     except BrokenPipeError:
         pass
     proc.stdin.close()
@@ -56,7 +88,7 @@ def _encode_topic(ffmpeg, group, names, video_path, fps, threads, video_args):
         raise RuntimeError(f"ffmpeg failed on {group.name} (exit code {proc.returncode})")
 
 
-def _check_topic(ffmpeg, group, names, video_path, threads):
+def _check_topic(ffmpeg, group, names, video_path, threads, progress=None):
     """Decode the video and compare every frame with the raw image. Returns frame count and PSNR."""
     h, w, _ = group[names[0]].shape
     reader = FrameReader(ffmpeg, video_path, w, h, threads)
@@ -68,6 +100,8 @@ def _check_topic(ffmpeg, group, names, video_path, threads):
                 break
             values.append(psnr(group[name][()], frame))
             count += 1
+            if progress:
+                progress.step("checking the video")
     finally:
         code, extra_bytes = reader.close()
     if code != 0:
@@ -89,6 +123,7 @@ def encode_file(raw_path, out_dir, ffmpeg, threads=4, video_args=None, min_psnr=
         shutil.rmtree(work)
     work.mkdir()
     t0 = time.time()
+    progress = None
     summary = {"format_version": FORMAT_VERSION, "source": raw_path.name, "source_bytes": raw_path.stat().st_size,
                "video_args": video_args, "cameras": {}, "files": {}, "ok": False, "errors": []}
     try:
@@ -98,6 +133,7 @@ def encode_file(raw_path, out_dir, ffmpeg, threads=4, video_args=None, min_psnr=
             index.attrs["format_version"] = FORMAT_VERSION
             topics = message_groups(src)
             images = [t for t in topics if is_image_topic(src[t])]
+            progress = Progress(out_dir / f".{stem}.progress.json", sum(len(src[t]) for t in images) * (2 if check else 1))
             # Copy everything that is not a camera image, unchanged (h5py copies data, attributes,
             # chunking and compression exactly). Groups on the way to image topics are recreated
             # with their attributes; their other children are copied.
@@ -127,7 +163,7 @@ def encode_file(raw_path, out_dir, ffmpeg, threads=4, video_args=None, min_psnr=
                 fps = int(round(1e9 / np.median(np.diff(ts)))) if len(ts) > 1 else 30
                 slug = camera_slug(topic)
                 video = work / f"{stem}.{slug}.mp4"
-                _encode_topic(ffmpeg, group, names, video, fps, threads, video_args)
+                _encode_topic(ffmpeg, group, names, video, fps, threads, video_args, progress)
 
                 entry = index.create_group(slug)
                 entry.attrs["topic"] = topic
@@ -147,7 +183,7 @@ def encode_file(raw_path, out_dir, ffmpeg, threads=4, video_args=None, min_psnr=
                 cam = {"topic": topic, "frames": len(names), "shape": list(first.shape), "nominal_fps": fps,
                        "video_bytes": video.stat().st_size}
                 if check:
-                    cam.update(_check_topic(ffmpeg, group, names, video, threads))
+                    cam.update(_check_topic(ffmpeg, group, names, video, threads, progress))
                     if cam["frames_decoded"] != len(names):
                         summary["errors"].append(f"{slug}: {cam['frames_decoded']} frames decoded, {len(names)} recorded")
                     if cam["psnr_min"] < min_psnr:
@@ -170,6 +206,8 @@ def encode_file(raw_path, out_dir, ffmpeg, threads=4, video_args=None, min_psnr=
         return summary
     finally:
         shutil.rmtree(work, ignore_errors=True)
+        if progress:
+            progress.remove()
 
 
 def is_archived(raw_path, out_dir):

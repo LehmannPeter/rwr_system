@@ -48,7 +48,7 @@ def run():
         live = S.monitor.live(); print("live: policy", live["policy"], "arm_cmd", live["arm_cmd"][:3], "hand_cmd[0]", live["hand_cmd"][0])
         print("arm commands reach the controller topic in preview:", S.monitor.commands_flowing, "| torque calls:", torque())
         print("start twice ->", api("/api/inference/cmd/start").get("ERR"))
-        print("processing while the policy runs ->", api("/api/datasets/no_such_session/process").get("ERR"))
+        print("transfer of an unknown session ->", api("/api/datasets/no_such_session/transfer").get("ERR"))
         time.sleep(1.5); i = inf(); print("pauses:", i["pauses"], "| last:", i["last_pause"] and i["last_pause"]["text"])
         print("timing:", i["timing"])   # with the mock: predict_ms 60, age_max_ms 100, limit_ms 200, dropped 0
         print("stop policy:", api("/api/inference/cmd/stop").get("ERR", "accepted"), "| policy_on:", not wait(lambda: not inf()["policy_on"]), "| producing:", not wait(lambda: not inf()["producing"]))

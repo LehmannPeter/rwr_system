@@ -38,11 +38,12 @@ ARCHIVE_JOB = HERE / "archive_job.py"
 def archive_settings():
     """Where and how demos are copied to the Training machine. Set in static/local/station.json, e.g.
     {"archive_host": "<ssh alias>", "archive_data_root": "~/rwr_task2/data",
-     "archive_remote_rsync": "~/.local/rsync/rsync", "archive_transfer_processed": true,
+     "archive_remote_rsync": "~/.local/rsync/rsync",
      "archive_require_hf_backup": true, "archive_after_transfer": "~/rwr_task2/after_transfer.sh"}
     or with $APE_ARCHIVE_HOST, $APE_ARCHIVE_DATA_ROOT, $APE_REMOTE_RSYNC, $APE_ARCHIVE_TRANSFER_PROCESSED,
     $APE_ARCHIVE_REQUIRE_HF_BACKUP (0/1), $APE_ARCHIVE_AFTER_TRANSFER, $APE_ARCHIVE_SSH (remote shell, rarely needed).
-    archive_after_transfer is empty by default (off): nothing is started on the Training machine."""
+    archive_after_transfer is empty by default (off): nothing is started on the Training machine.
+    archive_transfer_processed is still read but no longer used: since 2026-11-26 APE transfers the archive only."""
     try:
         cfg = json.loads(STATION_FILE.read_text())
     except Exception:
@@ -147,7 +148,8 @@ class Station:
         try:
             d = json.loads(f.read_text())
             streams = d.get("streams", {})
-            first = next(iter(streams.values()), {})
+            # frames of the workspace camera (raw check) or of the synchronized file; else the first stream
+            first = streams.get("/oakd_front_view/color") or next(iter(streams.values()), {})
             return {
                 "ok": bool(d.get("ok")),
                 "errors": [str(e) for e in d.get("errors", [])][:8],
@@ -233,13 +235,17 @@ class Station:
             cmd += ["--rsync-path", a["remote_rsync"]]
         if a["ssh"]:
             cmd += ["--ssh", a["ssh"]]
-        if not a["transfer_processed"]:
-            cmd.append("--no-processed")
+        cmd.append("--no-processed")   # archive only: the Training machine rebuilds the processed files
         if action == "transfer" and a["after_transfer"]:
             cmd += ["--after-transfer", a["after_transfer"]]
         if action == "clear" and not a["require_hf_backup"]:
             cmd.append("--no-require-hf-backup")
         return cmd
+
+    def transfer_command(self, dataset):
+        """Encode what is still missing, copy the archives and manifest.csv, verify, start the after-transfer step."""
+        safe(dataset)
+        return self._archive_job_args("transfer", dataset)
 
     def clear_command(self, dataset):
         """Delete the local files of demos that are verified on the Training machine (re-verified first)."""
@@ -258,10 +264,10 @@ class Station:
             state, text = "cleared", f"on the Training machine, cleared here {c.get('at', '')}"
         elif v.get("ok"):
             state, text = "verified", f"copied and verified {v.get('at', '')}"
+        elif a and not a.get("ok", True):   # the cause, rather than "not verified" (its consequence)
+            state, text = "archive_failed", "; ".join(a.get("errors") or []) or "archiving failed"
         elif v:
             state, text = "not_verified", "; ".join(v.get("problems") or []) or "not verified"
-        elif a and not a.get("ok", True):
-            state, text = "archive_failed", "; ".join(a.get("errors") or []) or "archiving failed"
         elif a:
             state, text = "archived", "archived, not copied yet"
         else:
@@ -273,137 +279,124 @@ class Station:
         return {"state": state, "text": text, "hf": bool(hf.get("ok")),
                 "archive_mb": round((a.get("bytes") or 0) / 1e6, 1) if a.get("bytes") else None}
 
-    def upload_command(self):
-        return [sys.executable, "-u", str(self.tool), "--data", str(self.data), "push"]
-
     def hf_repo(self):
         try:
             return (self.data / "hf_repo.txt").read_text().strip()
         except Exception:
             return os.environ.get("RWR_HF_REPO", "")
 
-    def list_datasets(self):
+    def list_datasets(self, busy=None):
+        """Sessions with their demos for card 3. busy: the background worker's info() (what it is doing now)."""
+        from background import progress_of
+
+        busy = busy or {}
         out = []
-        raw_names = {d.name for d in self.raw.iterdir() if d.is_dir()} if self.raw.is_dir() else set()
-        if self.processed.is_dir():  # processed folders whose raw folder is gone
-            raw_names |= {d.name[: -len(PROCESSED_SUFFIX)] for d in self.processed.iterdir() if d.is_dir() and d.name.endswith(PROCESSED_SUFFIX)}
+        names = set()
+        for folder in (self.raw, self.data / "archive", self.archive_status):
+            if folder.is_dir():
+                names |= {d.name for d in folder.iterdir() if d.is_dir()}
+        if self.processed.is_dir():  # processed folders of older sessions
+            names |= {d.name[: -len(PROCESSED_SUFFIX)] for d in self.processed.iterdir() if d.is_dir() and d.name.endswith(PROCESSED_SUFFIX)}
         manifest = self._manifest()
         prefix_of = lambda session: (re.match(r"^(s\d+)_\d{4}-\d{2}-\d{2}_.+$", session) or [None, session])[1]
-        for name in sorted(raw_names):
-            raw_dir, proc_dir = self.raw / name, self.processed / (name + PROCESSED_SUFFIX)
+        for name in sorted(names):
+            raw_dir, proc_dir, arc_dir = self.raw / name, self.processed / (name + PROCESSED_SUFFIX), self.data / "archive" / name
             raw = {f.stem: f for f in raw_dir.glob("*.h5")} if raw_dir.is_dir() else {}
             proc = {f.stem: f for f in proc_dir.glob("*.h5")} if proc_dir.is_dir() else {}
+            arc = {f.name[: -len(".archive.json")] for f in arc_dir.glob("*.archive.json")} if arc_dir.is_dir() else set()
             status_dir = self.archive_status / name
-            cleared = {f.stem for f in status_dir.glob("*.json")} - set(raw) - set(proc) if status_dir.is_dir() else set()
+            known = {f.stem for f in status_dir.glob("*.json")} if status_dir.is_dir() else set()
+            stems = set(raw) | set(proc) | arc | known
+            if not stems:
+                continue
             # Name in dataset versions, as rwr_data.py builds it: <session prefix>_<colour>_<position in the session>
-            listed = sorted({stem for (ses, stem) in manifest if ses == name} | set(raw) | set(proc) | cleared)
+            listed = sorted({stem for (ses, stem) in manifest if ses == name} | stems)
             number = {stem: i for i, stem in enumerate(listed, start=1)}
             demos = []
-            for stem in sorted(set(raw) | set(proc) | cleared):
+            for stem in sorted(stems):
                 row = manifest.get((name, stem), {})
+                state = self.archive_state(name, stem)
+                prog = progress_of(arc_dir, stem)
+                if prog:
+                    work = {"task": "encode", "pct": round(100 * prog.get("done", 0) / max(1, prog.get("total", 1))), "stage": prog.get("stage", "")}
+                elif busy.get("session") == name and busy.get("demo") == stem:
+                    work = {"task": busy.get("task"), "pct": None, "stage": ""}
+                elif stem in raw and stem not in arc and not (state and state["state"] == "archive_failed"):
+                    work = {"task": "wait_encode", "pct": 0, "stage": ""}
+                else:
+                    work = None
                 demos.append({
                     "dataset_name": f"{prefix_of(name)}_{row.get('colour') or 'nocolour'}_{number[stem]:04d}.h5",
                     "description": row.get("description", ""),
                     "name": stem,
                     "raw_gb": round(raw[stem].stat().st_size / 1e9, 2) if stem in raw else None,
                     "processed_gb": round(proc[stem].stat().st_size / 1e9, 2) if stem in proc else None,
-                    "check": self._summary(name, stem) if stem in proc else None,
-                    "colour": manifest.get((name, stem), {}).get("colour", ""),
-                    "keep": manifest.get((name, stem), {}).get("keep", ""),
-                    "archive": self.archive_state(name, stem),
+                    "check": self._summary(name, stem),
+                    "colour": row.get("colour", ""),
+                    "keep": row.get("keep", ""),
+                    "archive": state,
+                    "work": work,
+                    "viewable": stem in raw or self._archive_complete(arc_dir, stem),
+                    "stem_archived": stem in arc,
                 })
+            local_gb = lambda d: (d["raw_gb"] or 0) + (d["processed_gb"] or 0) + (((d["archive"] or {}).get("archive_mb") or 0) / 1000 if d["stem_archived"] else 0)
+            freed_gb = lambda d: (d["raw_gb"] or 0) + (d["processed_gb"] or 0)   # Clear keeps the archive
+            verified = [d for d in demos if d["archive"] and d["archive"]["state"] == "verified"]
             out.append({
                 "name": name,
                 "demos": demos,
-                "total_gb": round(sum((d["raw_gb"] or 0) + (d["processed_gb"] or 0) for d in demos), 1),
-                "todo": sum(1 for d in demos if d["raw_gb"] is not None and (d["processed_gb"] is None or d["check"] is None)),
-                "processed_dir": str(proc_dir),
+                "total_gb": round(sum(local_gb(d) for d in demos), 1),
+                "to_encode": sum(1 for d in demos if d["work"] and d["work"]["task"] in ("encode", "wait_encode")),
+                "to_check": sum(1 for d in demos if d["raw_gb"] is not None and d["check"] is None),
                 # verified on the Training machine; the clear job checks the Hugging Face backup again itself
-                "clearable": sum(1 for d in demos if d["archive"] and d["archive"]["state"] == "verified"),
-                "clearable_hf": sum(1 for d in demos if d["archive"] and d["archive"]["state"] == "verified" and d["archive"]["hf"]),
-                "clearable_gb": round(sum((d["raw_gb"] or 0) + (d["processed_gb"] or 0) for d in demos
-                                          if d["archive"] and d["archive"]["state"] == "verified"), 1),
+                "clearable": len(verified),
+                "clearable_hf": sum(1 for d in verified if d["archive"]["hf"]),
+                "clearable_gb": round(sum(freed_gb(d) for d in verified), 1),
                 "next_number": len(listed) + 1,
             })
         return out
 
-    def process_command(self, dataset):
-        """Shell script: synchronize the demos that are not processed yet, then check the unchecked ones."""
-        safe(dataset)
-        raw_dir, proc_dir = self.raw / dataset, self.processed / (dataset + PROCESSED_SUFFIX)
-        if not raw_dir.is_dir():
-            raise DataError("This dataset has no raw recordings.")
-        prev = self.previews / dataset
-        return (
-            f'set -u; cd "{self.workspace}"\n'
-            f'echo "== Synchronizing new recordings of {dataset} =="\n'
-            f'ros2 run logger syncronize_data.py "{raw_dir}" --compress --skip_existing --max_parallel 2 --output_folder "{proc_dir}" --cfg_file "{self.logger_cfg}"\n'
-            f'sync_status=$?\n'
-            f'echo "== Checking recordings =="\n'
-            f'for f in "{proc_dir}"/*.h5; do [ -e "$f" ] || continue; n=$(basename "$f" .h5)\n'
-            f'  if [ ! -f "{prev}/$n/summary.json" ]; then echo "-- $n"; '
-            f'python "{self.inspect_script}" "$f" --output "{prev}/$n" > "{prev}/$n.log" 2>&1 '
-            f'&& echo "   ok" || echo "   PROBLEMS FOUND (see the demo list)"; fi\n'
-            f'done\n'
-            f'echo "== Archiving and copying to the Training machine =="\n'
-            f'{shlex.join(self._archive_job_args("transfer", dataset))}\n'
-            f'archive_status=$?\n'
-            f'echo "== Done =="; [ $sync_status -ne 0 ] && exit $sync_status; exit $archive_status\n'
-        ), prev
+    @staticmethod
+    def _archive_complete(arc_dir, stem):
+        try:
+            s = json.loads((arc_dir / f"{stem}.archive.json").read_text())
+            return all((arc_dir / n).is_file() for n in s.get("files", {}))
+        except Exception:
+            return False
 
     # -- player ------------------------------------------------------------------
+    # A demo is shown from its raw file while it is on this PC (exact images, available the moment it is saved), and
+    # from its video archive once the raw file is cleared (Clear keeps the archive). The timeline is the workspace
+    # camera's frames.
     def _open(self, dataset, demo):
-        import h5py
-
-        path = self.processed / (safe(dataset) + PROCESSED_SUFFIX) / (safe(demo) + ".h5")
-        if not path.is_file():
-            raise DataError("This demo has not been processed yet.")
-        if self._h5 is None or self._h5[0] != path:
+        raw = self.raw / safe(dataset) / (safe(demo) + ".h5")
+        arc_dir = self.data / "archive" / dataset
+        if raw.is_file():
+            key = ("raw", raw)
+        elif self._archive_complete(arc_dir, demo):
+            key = ("archive", arc_dir / f"{demo}.archive.json")
+        else:
+            raise DataError("Neither the raw recording nor its archive is on this PC.")
+        if self._h5 is None or self._h5[0] != key:
             if self._h5 is not None:
-                try:
-                    self._h5[1].close()
-                except Exception:
-                    pass
-            self._h5 = (path, h5py.File(path, "r"))
+                self._h5[1].close()
+            self._h5 = (key, RawSource(raw) if key[0] == "raw" else ArchiveSource(arc_dir, demo))
         return self._h5[1]
 
     def demo_meta(self, dataset, demo):
         with self._h5_lock:
-            h = self._open(dataset, demo)
-            n = len(h["timestamps"]) if "timestamps" in h else 0
-            freq = float(h.attrs.get("sampling_frequency", 10))
-
-            def series(key, cols=None):
-                if key not in h:
-                    return None
-                v = np.asarray(h[key][:], dtype=float)
-                if cols is not None:
-                    v = v[:, cols]
-                return np.round(v, 4).tolist()
-
-            return {
-                "frames": n,
-                "freq": freq,
-                "cameras": [c for c in CAMERAS if f"observations/images/{c}/color" in h],
-                "arm_pos": series("observations/right/qpos_arm", slice(0, 3)),
-                "arm_cmd": series("right/actions_arm", slice(0, 3)),
-                "hand": series("observations/right/qpos_hand"),
-                "hand_cmd": series("right/actions_hand"),
-            }
+            src = self._open(dataset, demo)
+            return {"frames": src.frames, "freq": src.freq, "cameras": list(src.cameras), "source": src.kind}
 
     def demo_frame(self, dataset, demo, index, width=480):
         """One JPEG with both camera views of frame `index` side by side."""
         import cv2
 
         with self._h5_lock:
-            h = self._open(dataset, demo)
+            src = self._open(dataset, demo)
             tiles = []
-            for cam in CAMERAS:
-                key = f"observations/images/{cam}/color"
-                if key not in h:
-                    continue
-                ds = h[key]
-                img = rotate_for_display(cam, ds[max(0, min(int(index), len(ds) - 1))])
+            for cam, img in src.frame(int(index)):
+                img = rotate_for_display(cam, img)
                 height = 270  # same height for every view, so turned (portrait) views fit next to landscape ones
                 tiles.append(cv2.resize(img, (int(round(img.shape[1] * height / img.shape[0])), height), interpolation=cv2.INTER_AREA))
         if not tiles:
@@ -413,3 +406,85 @@ class Station:
         if not ok:
             raise DataError("Could not encode the frame.")
         return buf.tobytes()
+
+
+def _timeline(stamps_by_cam):
+    """Frame count, rate and, per camera, the index of the image nearest to each frame of the first camera."""
+    cams = [c for c in CAMERAS if c in stamps_by_cam and len(stamps_by_cam[c])]
+    if not cams:
+        return 0, 10.0, cams, {}
+    base = np.asarray(stamps_by_cam[cams[0]], dtype=np.int64)
+    freq = float(1e9 / np.median(np.diff(base))) if len(base) > 1 else 10.0
+    nearest = {}
+    for c in cams:
+        t = np.asarray(stamps_by_cam[c], dtype=np.int64)
+        j = np.clip(np.searchsorted(t, base), 1, max(1, len(t) - 1))
+        left = t[j - 1] if len(t) > 1 else t[0]
+        right = t[np.minimum(j, len(t) - 1)]
+        nearest[c] = np.where(np.abs(base - left) <= np.abs(right - base), j - 1, np.minimum(j, len(t) - 1)) if len(t) > 1 else np.zeros(len(base), int)
+    return len(base), round(freq, 2), cams, nearest
+
+
+class RawSource:
+    """Frames straight from a raw logger file: /<cam>/color/<receive time ns> datasets."""
+    kind = "raw"
+
+    def __init__(self, path):
+        import h5py
+
+        self.h5 = h5py.File(path, "r")
+        self.names = {}
+        for cam in CAMERAS:
+            g = self.h5.get(f"/{cam}/color")
+            if g is not None:
+                self.names[cam] = sorted(g.keys(), key=int)
+        self.frames, self.freq, self.cameras, self.nearest = _timeline({c: [int(n) for n in v] for c, v in self.names.items()})
+
+    def frame(self, i):
+        i = max(0, min(i, self.frames - 1))
+        return [(c, self.h5[f"/{c}/color/{self.names[c][self.nearest[c][i]]}"][()]) for c in self.cameras]
+
+    def close(self):
+        self.h5.close()
+
+
+class ArchiveSource:
+    """Frames decoded from a demo's video archive (<demo>.<cam>.mp4, frame times in <demo>.h5)."""
+    kind = "archive"
+
+    def __init__(self, arc_dir, stem):
+        import cv2
+        import h5py
+
+        stamps, self.caps, self.pos = {}, {}, {}
+        with h5py.File(arc_dir / f"{stem}.h5", "r") as h:
+            index = h.get("_video_archive")
+            for cam in CAMERAS:
+                if index is not None and cam in index:
+                    stamps[cam] = index[cam]["timestamps"][:]
+                    video = arc_dir / str(index[cam].attrs.get("video", f"{stem}.{cam}.mp4"))
+                    cap = cv2.VideoCapture(str(video))
+                    if not cap.isOpened():
+                        raise DataError(f"The archive video {video.name} could not be opened.")
+                    self.caps[cam], self.pos[cam] = cap, 0
+        self.frames, self.freq, self.cameras, self.nearest = _timeline(stamps)
+
+    def frame(self, i):
+        import cv2
+
+        i = max(0, min(i, self.frames - 1))
+        out = []
+        for c in self.cameras:
+            j, cap = int(self.nearest[c][i]), self.caps[c]
+            if j != self.pos[c]:            # sequential playback reads on; a jump seeks
+                cap.set(cv2.CAP_PROP_POS_FRAMES, j)
+            ok, img = cap.read()
+            self.pos[c] = j + 1 if ok else -1
+            if not ok:
+                raise DataError(f"Frame {j} of the {c} video could not be decoded.")
+            out.append((c, cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
+        return out
+
+    def close(self):
+        for cap in self.caps.values():
+            cap.release()
