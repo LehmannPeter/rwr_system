@@ -2,16 +2,16 @@
 
 Written only by the Claude Code session on the Robot PC. Replace the placeholders the first time; afterwards keep every section current. Rules: `handoff/README.md`.
 
-Last updated: 2026-11-25
+Last updated: 2026-11-26
 
 ## Setup
 
 | Item | Value |
 |---|---|
-| OS, GPU, free disk | Ubuntu 24.04.3 LTS (kernel 7.0.0-43); NVIDIA GeForce RTX 5060 Laptop GPU, 8 GB; 442 GB free of 937 GB |
+| OS, GPU, free disk | Ubuntu 24.04.3 LTS (kernel 7.0.0-43); NVIDIA GeForce RTX 5060 Laptop GPU, 8 GB; 192 GB free of 937 GB (2026-11-26) |
 | ROS workspace path | `~/rwr_humble_ws` (pixi, ROS 2 Humble, Python 3.12). `src/rwr_system` is a symlink to `~/Projects/rwr_system`. The teleop and recordings are normally started from the `ape_ui` web app (since 2026-11-21 in this repo: `~/Projects/rwr_system/ape_ui`; the robot's address is in the git-ignored `ape_ui/static/local/station.json`), which runs ROS in domain 7 with CycloneDDS |
-| `rwr_system` commit, branch, uncommitted changes | `9218688`, `main`, pushed; nothing uncommitted |
-| `rwr_il` commit, importable in the ROS environment (yes/no) | `7cfc042` (`main`); yes, `from srl_il.export.policy import get_policy_from_ckpt` works in the pixi env (warns that pytorch3d is not installed) |
+| `rwr_system` commit, branch, uncommitted changes | Since 2026-11-26: `main` (APE runs from this checkout, `~/Projects/rwr_system`); `policy-eval` is no longer checked out, and the extra worktree `~/rwr_system_main` was removed (it had no changes). Commit: see `git log`; nothing uncommitted after the report of 2026-11-26 |
+| `rwr_il` commit, importable in the ROS environment (yes/no) | Since 2026-11-26: branch `training-levers` (tracks `origin`; `git switch training-levers` alone fails because `origin` and `upstream` both have it), `3cb3c8a`, the commit Darwin and Dirac were trained with. Yes, `srl_il.export.policy` is imported from `~/Projects/rwr_il` (editable install). Its changes against `main` are in training, datasets and scripts only, not in `srl_il/export` |
 | Folder where recordings are stored | Since 2026-11-21: `~/rwr_humble_ws/data/raw/<session>/`, processed in `data/processed/<session>_10hz/`, per-episode labels in `data/manifest.csv`, dataset versions in `data/datasets/<version>/` (set by `ape_ui`; tool: `rwr_il/scripts/rwr_data.py`, described in `rwr_il/CLAUDE.md`). Session names: `s<nn>_<date>_<operator>` |
 | Camera IDs match `cube_sorting_task.yaml` (yes/no, checked when) | yes: both MXIDs in the config (front_view, wrist_view) were the devices the OAK-D node opened on 2026-11-21 |
 | Franka end-effector parameters (values, screenshot file, date) | not recorded yet |
@@ -41,6 +41,11 @@ Last updated: 2026-11-25
 - Uncommitted on 2026-11-21: `--output_folder` option in `src/logger/syncronize_data.py`, and `rwr_il/scripts/rwr_data.py` (manifest, dataset versions, Hugging Face push and pull). The Training machine needs the `rwr_il` change pushed before it can run `pull`. Hugging Face login and repo are not set up yet; `push` and `pull` were only tested against a local stand-in.
 
 - 2026-11-25: raw recordings of s04 have stalls of 0.1–1.8 s in which every recorded topic (both cameras, arm, hand) stops at the same moment; 5 of 8 demos, with or without a processing job. In the 10 Hz data such a stall gives a few steps with repeated images and interpolated poses. Cause not investigated (logger, bag writer or DDS suspected, not confirmed).
+
+- 2026-11-26: the arm stopped again and again with the reflex `communication_constraints_violation` (also before any motion command), and the controller then died (exit code -11). Cause found on this PC: with CycloneDDS's default settings, the camera images for the several readers here (inference node, APE, logger) went out as **multicast**, about 80 MB/s (640 Mbit/s) on the 1 Gbit wired robot network during a policy launch; the switch copies multicast to every port, so the NUC and the arm got it too. Fix: `ape_ui/cyclonedds.xml` (`AllowMulticast=spdp`: multicast only for discovery, data unicast), passed by APE as `CYCLONEDDS_URI` to every ROS process it starts (commit `2bf87ce`). After the APE restart: 1 kB/s on the wired link at idle, 7 policy runs without a reflex. ROS commands typed in a terminal by hand still use the default unless `CYCLONEDDS_URI` is exported (see `CLAUDE.md`, Session workflow). Not yet checked: whether the recording stalls of 2026-11-25 (all topics stop at the same moment) had the same cause.
+- 2026-11-26: a reflex is not cleared by *Restart controller*: the next controller fails with "Robot is in command error state! Please trigger automatic recovery first" (`Set Joint Impedance command rejected ... ("Reflex")`). Pressing and releasing the black stop button, then *Start controller*, worked. APE's note keeps the first warning lines, so after several tries the shown pid can be an old one.
+- 2026-11-26: `ape_ui/run.sh` fails when started with a relative path (`ape_ui/run.sh` → "can't open file '~/rwr_humble_ws/./server.py'"), because it changes directory before resolving its own path. Starting it with the full path works. Not fixed.
+- 2026-11-26: the saved NetworkManager connection *ETH VPN* held an expired openconnect cookie (all secrets stored, no `*-flags`), so it failed before the login window. Fixed: stored cookie, gateway, certificate and xmlconfig removed and set to "ask every time" (`*-flags=2`); group and username prefill kept. The prefilled username is a teammate's; enter your own. Backup of the old settings was only in the session scratch folder.
 
 ## Video archive (instruction 2026-11-25-01, 2026-11-25)
 
@@ -87,9 +92,19 @@ Changed during this instruction, at the person's request (committed `e946c06` on
 
 - 2026-11-25: *Move to center* in APE's policy card is now the Operate card's move (smooth, about 10 cm/s, with settling) instead of the inference node's slow `init_arm`, and both cards' buttons work without the station launch: APE starts the arm teleop node on its own (`ape_arm_mover`) and stops it before a station launch. Guards: no move while the policy drives the arm, no *Start policy* or second move while a move runs, no teleop start with only the mover. Tested against `tests/mock_station.py` on ROS domain 181 (scratch test, not in `tests/`), and the page was rendered in headless Chrome; not yet tried on the robot. Uncommitted (`ape_ui/server.py`, `ape_ui/static/index.html`, `ape_ui/README.md`), branch `policy-eval`. Needs an APE restart. Follow-up the same day: the Operate card greyed out its whole switch block without a launch, so its *Move to center* could not be clicked; now only the other switches are greyed out, and *Move to center* turns into *Stop move* while a move runs (there is no other stop button without a launch).
 
+## Evaluated runs and policies (instruction 2026-11-26-01, 2026-11-26)
+
+- Step 2: `git status --short` clean; `git merge --ff-only origin/main` on `policy-eval` → `fe72d32` (same code as `main`). Later the same day the checkout was switched to `main` (see Setup).
+- Step 3: APE was not running; started with `ape_ui/run.sh`. Output: "Evaluated runs: 20 moved into the folders of their policy and checkpoint." with no problem lines. `data/eval/` then held only 13 policy folders and `trials.csv`; card 5 listed all 20 runs with the *Uploaded* column and the upload button.
+- Step 4: videos of `Ampere…/best_model/20261125-114115`: both served by APE (HTTP 200, 1.5 and 3.4 MB) and decode with ffmpeg without errors; played in a browser by the person: not confirmed separately. Upload (pressed by the person, after connecting the ETH VPN): verified 21 of 21 runs on the Training machine at 10:05 (20 of 2026-11-25 and one of 2026-11-26), no `changed` or `different`; a `policy_log.h5` was written for all 21 (no run without an inference log), e.g. Boltzmann `20261125-124941`: 1.8 MB `policy_log.h5` against 1.7 GB inference log. Nothing deleted in `inference_logs/`.
+- Step 5 (measurements of the live run): not done as such. Policy runs did take place on 2026-11-26 (Darwin 3, Dirac 5) with the new video settings; their videos are about 100–135 MB per camera for runs of a few minutes. All 29 runs verified on the Training machine at 11:20 (second upload, about 1.6 GB at about 2.2 MB/s over the VPN). ffmpeg CPU load, prediction time and `video_frames_lost` were not measured.
+- Policies pulled from the Training machine on 2026-11-26 into `~/rwr_humble_ws/policies/` (same layout as before, name-prefixed): **Darwin** (`20261125-231332_s02s03s04_v2_act`; Bernoulli + s04, commanded arm pose, no crop, 150 epochs; `best_model`, `checkpoint_150`, 122 MB) and **Dirac** (`20261125-232217_s02s03s04_v2_act`; ResNet-18 end to end + commanded pose + crop, 300 epochs; `best_model`, `checkpoint_300`, 629 MB). sha256 of all 4 checkpoints equal to the Training machine's. Still training then (not pulled): Descartes, Doppler, Euclid. The local Curie `best_model` is from 2026-11-25 17:17, before that run stopped at epoch 103; not refreshed. The Training machine's rsync is `~/.local/rsync/rsync` (`--rsync-path`), not on its PATH.
+- Pulled later the same day: `5bb3d87` (archive-only transfer, after-transfer trigger). `station.json` already has `archive_transfer_processed: false`; `archive_after_transfer` is not set, so nothing is started on the Training machine after a transfer.
+
 ## Handled instructions
 
 | ID | Status (done / blocked) | Date | Result |
 |---|---|---|---|
 | 2026-11-21-01 | done | 2026-11-21 | `.machine` = `robot_pc` written in `rwr_system` and `rwr_il`; Setup table filled |
 | 2026-11-25-01 | done (section 6 partly) | 2026-11-25 | s01–s03 archived and verified on the Training machine except s03 `20261121_215255` (expected); checklist sections 0, 2, 4, 5 passed, 1 and 3 skipped, 6 partly; see "Video archive" |
+| 2026-11-26-01 | done (step 5 not measured) | 2026-11-26 | `fe72d32`; 20 runs moved without problems; videos served and decodable; 21 of 21 then 29 of 29 runs verified on the Training machine, 21 `policy_log.h5` written; see "Evaluated runs and policies" |
