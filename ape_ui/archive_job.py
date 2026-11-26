@@ -6,11 +6,12 @@
                                                        copy archive (and processed) files to the Training
                                                        machine with rsync --ignore-existing, verify by checksum
     archive_job.py verify   --data DATA --session S   only the checksum verification (and the HF markers)
-    archive_job.py clear    --data DATA --session S   verify again, then delete the local raw, processed and
-                                                       archive files of every demo whose files all match on the
-                                                       Training machine and (by default) that is backed up on
-                                                       Hugging Face (course rule: clear the Robot PC after each
-                                                       session). <demo>.meta.json and manifest.csv stay.
+    archive_job.py clear    --data DATA --session S   verify again, then delete the local raw and processed
+                                                       files of every demo whose archive matches on the Training
+                                                       machine and (by default) that is backed up on Hugging Face
+                                                       (course rule: clear the Robot PC after each session). The
+                                                       archive (about 15 MB per demo), <demo>.meta.json and
+                                                       manifest.csv stay, so APE can still show the demo.
 
 Destination: --host (ssh target, e.g. an alias from ~/.ssh/config; for tests --local-dest instead) and
 --dest-root (data root there, default ~/rwr_task2/data). Files go to <dest-root>/archive/<session>/ and, unless
@@ -33,6 +34,7 @@ Plain Python (stdlib); needs rsync on both machines (3.2.3 or newer for --mkpath
 password prompt (BatchMode).
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -58,6 +60,42 @@ def sha256(path, block=1 << 20):
         while chunk := f.read(block):
             h.update(chunk)
     return h.hexdigest()
+
+
+def save_status(status_dir, stem, **parts):
+    """Update parts of <status_dir>/<stem>.json. APE's background encoder and this job both write these files, so
+    the read-modify-write runs under a lock."""
+    status_dir = Path(status_dir)
+    status_dir.mkdir(parents=True, exist_ok=True)
+    with open(status_dir / ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            s = json.loads((status_dir / f"{stem}.json").read_text())
+        except Exception:
+            s = {}
+        s.update(parts)
+        s["updated_at"] = now()
+        tmp = status_dir / f".{stem}.json.tmp"
+        tmp.write_text(json.dumps(s, indent=1))
+        tmp.replace(status_dir / f"{stem}.json")
+
+
+def record_archive(status_dir, archive_dir, raw_dir, stem, failure=None):
+    """Write the archive part of a demo's status from <archive_dir>/<stem>.archive.json (or `failure`)."""
+    try:
+        summary = json.loads((Path(archive_dir) / f"{stem}.archive.json").read_text())
+    except Exception:
+        summary = None
+    if summary is None:
+        if failure or (Path(raw_dir) / f"{stem}.h5").is_file():
+            save_status(status_dir, stem, archive={"ok": False, "errors": [failure or "not archived (see the job log)"]})
+        return
+    save_status(status_dir, stem, archive={
+        "ok": bool(summary.get("ok")), "errors": summary.get("errors", []),
+        "bytes": summary.get("archive_bytes"), "source_bytes": summary.get("source_bytes"),
+        "crf": next((a for i, a in enumerate(summary.get("video_args", [])) if i and summary["video_args"][i - 1] == "-crf"), None),
+        "psnr_mean": {k: round(v.get("psnr_mean", 0), 2) for k, v in summary.get("cameras", {}).items()},
+        "psnr_min": {k: round(v.get("psnr_min", 0), 2) for k, v in summary.get("cameras", {}).items()}})
 
 
 class Job:
@@ -97,12 +135,7 @@ class Job:
             return {}
 
     def save(self, stem, **parts):
-        s = self.status(stem)
-        s.update(parts)
-        s["updated_at"] = now()
-        tmp = self.status_dir / f".{stem}.json.tmp"
-        tmp.write_text(json.dumps(s, indent=1))
-        tmp.replace(self.status_dir / f"{stem}.json")
+        save_status(self.status_dir, stem, **parts)
 
     # -- what belongs to a demo -----------------------------------------------------------
     def stems(self):
@@ -141,17 +174,7 @@ class Job:
         print("$ " + shlex.join(cmd), flush=True)
         code = subprocess.run(["nice", "-n", "10", *cmd]).returncode
         for stem in self.stems():
-            summary = self.archive_summary(stem)
-            if summary is None:
-                if (self.raw / f"{stem}.h5").is_file():
-                    self.save(stem, archive={"ok": False, "errors": ["not archived (see the job log)"]})
-                continue
-            self.save(stem, archive={
-                "ok": bool(summary.get("ok")), "errors": summary.get("errors", []),
-                "bytes": summary.get("archive_bytes"), "source_bytes": summary.get("source_bytes"),
-                "crf": next((a for i, a in enumerate(summary.get("video_args", [])) if i and summary["video_args"][i - 1] == "-crf"), None),
-                "psnr_mean": {k: round(v.get("psnr_mean", 0), 2) for k, v in summary.get("cameras", {}).items()},
-                "psnr_min": {k: round(v.get("psnr_min", 0), 2) for k, v in summary.get("cameras", {}).items()}})
+            record_archive(self.status_dir, self.archive, self.raw, stem)
         return code
 
     def transfer(self):
@@ -301,9 +324,10 @@ class Job:
             if self.args.require_hf_backup and not s.get("hf", {}).get("ok"):
                 kept.append(f"{stem}: {s.get('hf', {}).get('text', 'not backed up on Hugging Face')}")
                 continue
-            files = [Path(p) for p in s["verified"]["files"]]
-            # the raw recording is covered by the archive; the processed file is either compared byte for byte
-            # (default) or, with --no-processed, can be rebuilt from the archive with reconstruct_raw.py
+            # The raw recording is covered by the archive; the processed file is either compared byte for byte
+            # (default) or, with --no-processed, can be rebuilt from the archive with reconstruct_raw.py. The archive
+            # itself stays on this PC (small; APE plays cleared demos from it), and so does <demo>.meta.json.
+            files = [Path(p) for p in s["verified"]["files"] if Path(p).parent != self.archive]
             for extra in (self.raw / f"{stem}.h5", self.processed / f"{stem}.h5"):
                 if extra.is_file() and extra not in files:
                     files.append(extra)

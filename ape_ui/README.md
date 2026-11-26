@@ -84,22 +84,37 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
    *Hand details*, *Arm details* and *Other details* open on click and stay open:
    all joint values, motor currents and temperatures, arm pose commanded against measured,
    joint torques, external force, contact flags, stream rates and gaps, running nodes.
-5. **Recorded demos:** lists every demo of a dataset with its size and check result.
-   *Process and check new demos* synchronizes the demos that are not processed yet and
-   runs the inspection on each; already processed demos are skipped. *View* plays a
-   processed demo (both cameras, with a slider). Since 2026-11-25 processing (and the upload
-   below) may run while you record: the job runs at the lowest CPU priority (`nice 19`), and
-   the logger saves each demo as `<name>.h5.part` and renames it when complete, so a job never
-   reads a half-written file. A demo saved while the job runs is picked up by the next *Process*.
-   Not yet measured on a real recording (stream rates and gaps with and without a job).
-   - *Process and check new demos* also archives and copies each demo to the Training machine
-     (see "Video archive and transfer" below). The column *Archive / Training machine* shows
-     per demo: not archived, archived, archive failed, not verified, verified, cleared here.
-     Hover for details (PSNR of the archive check, which file differs).
-   - *Clear transferred demos* deletes the raw, processed and archive files of the demos marked
+5. **Recorded demos:** lists every demo of a session with its size, check result and transfer state.
+   Since 2026-11-26 nothing is synchronized (processed) on this PC; the Training machine makes the 10 Hz files from
+   the video archive.
+   - **In the background** (`background.py`), as soon as a demo is saved: its raw file is encoded into the video
+     archive, one demo at a time, at the lowest CPU priority (`nice 19`), between recordings. Once nothing
+     is left to encode, each raw file is checked (`experiments/scripts/inspect_demonstration.py`: required streams,
+     gaps, timing, trajectory plot). Encoding comes first because the transfer needs it. Nothing runs while a policy
+     runs or an evaluation is recorded (an encode in progress is stopped and redone later), nor while a card-3 job
+     runs. While a demo is being recorded, reviewed or saved, the running encode or check is suspended (it holds
+     right before the logger starts) and continues right after the save or discard, so its CPU and disk use cannot
+     add stream gaps (gaps of 0.1–1.8 s were seen in s04 without any encoding). `APE_ENCODE_WHILE_RECORDING=1` turns
+     the hold off, only to measure its effect (`TEST_VIDEO_ARCHIVE.md`, section 9). A demo whose encoding failed is shown as *encoding failed* and not retried in the background (the next
+     transfer tries again). The logger saves each demo as `<name>.h5.part` and renames it when complete, so a
+     half-written file is never read. Log: `~/rwr_humble_ws/work/ape_background.log`. Not yet measured on a real
+     recording.
+   - *View* plays a demo (both cameras, with a slider) straight from its raw file, so a demo can be viewed the
+     moment it is saved. A demo whose raw file is gone but whose archive is still here plays from the archive
+     (decoded on the server: browsers cannot play 4:4:4 video); that is the case after *Clear*, which keeps the
+     archive.
+   - *Transfer new demos* copies the session's archives and `manifest.csv` to the Training machine and verifies them
+     there (see "Video archive and transfer" below). If a demo is being encoded, it starts right after that demo;
+     anything not encoded yet is encoded by the transfer job first. The column *Archive / Training machine* shows per
+     demo: waiting to encode, encoding with a progress bar, encoded, encoding failed, copying, not verified,
+     verified, verified + HF, cleared here, and a bar above the table shows how far the session is (encoded counts
+     80 %, verified 100 %). Hover for details (PSNR of the archive check, which file differs).
+   - *Clear transferred demos* deletes the raw (and any old processed) files of the demos marked
      *verified* (course rule: clear the Robot PC after each session). Before deleting it compares
-     every file with the Training machine again, byte for byte; a demo that does not match is
-     kept. `<demo>.meta.json`, `manifest.csv` and the check results stay.
+     every archive file with the Training machine again, byte for byte; a demo that does not match is
+     kept. The archive (about 15 MB per demo, so cleared demos can still be viewed), `<demo>.meta.json`,
+     `manifest.csv` and the check results stay. Archives therefore pile up in `data/archive/`; a way to delete
+     those older than N days is planned, not built yet.
 6. **Recalibrate hand at next start** (in *Hand details*): moves the calibration file to
    `~/rwr_humble_ws/hand_calibration_backups/`, so the hand calibrates itself when the
    next launch starts. Only possible while no launch is running. Do this only for a
@@ -257,9 +272,7 @@ browser tab stops nothing.
 - Hand motor current and temperature need the two topics that were added to
   `rwr_system/src/hand_control/hand_control_node.py` (`/right/hand/motor_current`,
   `/right/hand/motor_temperature`). Without them the page shows "not reported".
-- Processing uses the `--skip_existing` and `--max_parallel` options that were added to
-  `rwr_system/src/logger/syncronize_data.py`, and its `--output_folder` option. Check results are stored in
-  `~/rwr_humble_ws/work/ape_previews/`.
+- Check results are stored in `~/rwr_humble_ws/work/ape_previews/<session>/<demo>/`.
 - `tests/mock_station.py` is a fake station for trying APE without the robot. It refuses
   to run on the robot's ROS domain. `tests/mock_inference.py` stands in for the policy launch
   (`APE_INFERENCE_TEST_CMD`); `tests/test_inference.py` covers the policy card and
@@ -277,13 +290,11 @@ browser tab stops nothing.
   page builds the *session* name `s<nn>_<date>_<operator>` from them and today's date, and
   refuses a number that another session already uses. The operator list is the
   `<select id="ses-op">` in `static/index.html`. Recordings go to `~/rwr_humble_ws/data/raw/<session>/`,
-  processed files to `data/processed/<session>_10hz/`. `data/manifest.csv` has one row per
+  their archives to `data/archive/<session>/`. `data/manifest.csv` has one row per
   demo; dataset versions and the Hugging Face transfer are done by
   `rwr_il/scripts/rwr_data.py` (see `rwr_il/CLAUDE.md`).
-- *Upload to Hugging Face* runs `rwr_data.py push` as the processing job: raw and processed
-  recordings that are not uploaded yet, the manifest and the dataset version lists. It needs
-  a one-time `pixi run hf auth login` and `rwr_data.py push --repo <user>/<name>` in a
-  terminal. It may run during a recording, at the lowest CPU priority, like processing.
+- The *Upload to Hugging Face* button was removed on 2026-11-26: the Training machine backs up the archives to
+  Hugging Face after each transfer (`hf_backup_archive.py`, below).
 - The files as they were before the data layout change are in `backup_before_data_layout/`.
 - Live view arm plots: path from above and from the side, measured (blue) and commanded
   (dashed, only while teleop runs), the custom pose as a diamond, plus the readouts *Arm
@@ -303,19 +314,22 @@ browser tab stops nothing.
 
 ## Video archive and transfer
 
-After synchronizing and checking, the processing job runs `archive_job.py transfer` for the session:
+*Transfer new demos* runs `archive_job.py transfer --no-processed` for the session (encoding normally happened in the
+background already, demo by demo):
 
-1. **Archive** (`src/logger/encode_archive.py`, niced, 2 recordings at a time): each raw recording becomes
+1. **Archive** (`src/logger/encode_archive.py`, niced, 2 recordings at a time; skipped for demos already encoded):
+   each raw recording becomes
    `data/archive/<session>/<demo>.<camera>.mp4` (libx264 4:4:4, CRF 12, keyframe every 30 frames) plus
    `<demo>.h5` with every other topic unchanged and the image timestamps, `<demo>.meta.json`, and
-   `<demo>.archive.json` (settings, sha256 of each file, PSNR of every frame against the raw image).
+   `<demo>.archive.json` (settings, sha256 of each file, PSNR of every frame against the raw image). While it runs,
+   `.<demo>.progress.json` holds the frames done (the demo list's progress bar; rsync and the archive tools ignore
+   dot files).
    About 6 % of the raw file size (about 2.4 MB per second of recording). `src/logger/reconstruct_raw.py` turns it back into a raw-format file that
    `syncronize_data.py` processes like the original (all non-image data bit for bit; images lossy).
-2. **Copy** with `rsync -a --ignore-existing` to the Training machine: `archive/<session>/` and (unless
-   `archive_transfer_processed` is false) `processed/<session>_10hz/` under its data root. Files that already
-   exist there are never overwritten.
-3. **Verify** with `rsync --checksum --dry-run`: a demo is *verified* when all its archive files (and its
-   processed file) exist on the Training machine with the same content. The same run fetches the Hugging Face
+2. **Copy** with `rsync -a --ignore-existing` to the Training machine: `archive/<session>/` under its data root.
+   Files that already exist there are never overwritten.
+3. **Verify** with `rsync --checksum --dry-run`: a demo is *verified* when all its archive files exist on the
+   Training machine with the same content. The same run fetches the Hugging Face
    markers (below) and shows *verified + HF* for demos whose archive is backed up there.
 4. **Manifest**: `manifest.csv` is copied to `manifest_inbox/robot_pc.csv` on the Training machine (replaced every
    time). The Training machine's own `manifest.csv` is never overwritten: `rwr_data.py merge-manifest` there adds
@@ -332,15 +346,15 @@ Setup, once per station, in the git-ignored `static/local/station.json` (next to
 
 ```json
 {"robot_ip": "...", "archive_host": "<ssh alias of the Training machine>", "archive_data_root": "~/rwr_task2/data",
- "archive_remote_rsync": "~/.local/rsync/rsync", "archive_transfer_processed": true, "archive_require_hf_backup": true,
+ "archive_remote_rsync": "~/.local/rsync/rsync", "archive_require_hf_backup": true,
  "archive_after_transfer": ""}
 ```
 
 - `archive_remote_rsync`: the Training machine has no system rsync; an unpacked rsync 3.2.7 with a wrapper
   lives in `~/.local/rsync/rsync` there (home directory, survives restarts of the instance).
-- `archive_transfer_processed` (default true): also copy and verify the processed files (lossless at 10 Hz).
-  With false only the archive is copied; clearing then deletes the local processed files too, and the Training
-  machine rebuilds them with `src/logger/rebuild_processed.py` (images from the video; see *Archive-only transfer*).
+- `archive_transfer_processed`: no longer read (since 2026-11-26 APE always transfers the archive only and makes no
+  processed files). *Clear* still deletes processed files left from older sessions together with the rest. The
+  Training machine rebuilds the processed files with `src/logger/rebuild_processed.py` (see *Archive-only transfer*).
 - `archive_after_transfer` (default empty = off): command started on the Training machine after each verified
   transfer, normally `~/rwr_task2/after_transfer.sh` (see *Archive-only transfer*).
 - `archive_require_hf_backup` (default true): *Clear transferred demos* only deletes demos that are verified on
@@ -420,9 +434,8 @@ Check `latest.log` (or the *HF* state of the demos) before *Clear*. One run at a
 `~/rwr_task2/logs/after_transfer/<date-time>.log` and `latest.log`. Nothing keeps running after the last step or the
 last retry; if the instance restarts mid-run, the next transfer (or running the wrapper by hand) finishes the work. By hand: `~/rwr_task2/after_transfer.sh` (returns at once) or `~/rwr_task2/after_transfer.sh --foreground`.
 
-Switching a station: set `"archive_transfer_processed": false` in `static/local/station.json` (only between sessions,
-see `TEST_VIDEO_ARCHIVE.md`, section 7). The Robot PC still synchronises and checks every demo locally (previews,
-policy checks), but no longer copies or verifies the processed files, and *Clear* deletes them with the rest.
-Keep `archive_require_hf_backup: true` with it, so a demo is only deleted once its archive is on the Training machine
-and on Hugging Face.
+Since 2026-11-26 APE always transfers the archive only: it encodes each demo in the background, checks the raw file,
+and never synchronizes on this PC (`archive_transfer_processed` is no longer read). Keep
+`archive_require_hf_backup: true`, so a demo is only deleted once its archive is on the Training machine and on
+Hugging Face. Test checklist for the switch: `TEST_VIDEO_ARCHIVE.md`, section 9.
 

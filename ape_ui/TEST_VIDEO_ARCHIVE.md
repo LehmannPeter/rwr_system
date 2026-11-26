@@ -1,4 +1,7 @@
-# Test checklist: video archive, transfer and clearing (Robot PC, branch `video-archive`; sections 7–8: `archive-only`)
+# Test checklist: video archive, transfer and clearing (Robot PC, branch `video-archive`; sections 7–8: `archive-only`; section 9: background encoding)
+
+Since 2026-11-26 (section 9) the button *Process and check new demos* is called *Transfer new demos* and nothing is
+processed on the Robot PC; sections 1–8 describe the earlier behaviour.
 
 Nothing here moves the robot. Do it before or after a recording session, with APE running and no launch needed.
 Use a test session (e.g. `s90_<date>_test`) with 2–3 short demos; real sessions only after every step passed.
@@ -90,3 +93,38 @@ Only after the archive backup runs on the Training machine (`hf_backup_archive.p
       *verified + HF*; *Clear* deletes them.
 
 Report results in `handoff/ROBOT_PC_STATE.md`.
+
+## 9. Background encoding, View, *Transfer new demos* (between sessions)
+Nothing here moves the robot except recording the test demos, which needs the usual two people. Get the person's OK
+before any *Clear*.
+- [ ] The checkout APE runs from is on the commit with `ape_ui/background.py`; APE restarted (`run.sh`, full path).
+- [ ] Card 3: the buttons are *Transfer new demos*, *Clear transferred demos*, *Stop*; there is no *Upload to
+      Hugging Face* button and no *Processed GB* column.
+- [ ] Record a new test session (e.g. `s92_<date>_test`) with 3 short demos (about 30 s each). After each save,
+      without pressing anything: the demo appears with *waiting to encode*, then a progress bar *encoding NN %*, then
+      *encoded* with its MB; afterwards the *Check* column goes from *waiting* to *ok* (or problems).
+- [ ] Start the next recording while a demo is still *encoding*: the info line says "Background encoding paused: a
+      demo is being recorded" and the bar stops; it continues right after *Save*. `work/ape_background.log` shows
+      "suspended" and "continued" for that demo. Note how long one encode takes (times of its `--- encode` and
+      `--- exit` lines, minus the time it was suspended).
+- [ ] *View* on a demo right after its save (before it is encoded): it plays; the frame counter runs at about 30 per
+      second of recording.
+- [ ] **Stream gaps with and without encoding.** Restart APE with encoding allowed during recordings:
+      `APE_ENCODE_WHILE_RECORDING=1 ~/Projects/rwr_system/ape_ui/run.sh` (ask the person first: a restart stops
+      APE's launches). Record 3 more demos of the same length in the same session, each started while the previous one
+      is still *encoding* (a policy must not run). Then restart APE normally (without the variable). Compare the
+      largest gap per stream of the two groups:
+      `python3 -c "import json,glob,sys; [print(f.split('/')[-2], {k.split('/')[-1] if 'color' not in k else k.split('/')[1]: round(v['max_gap_s'],3) for k,v in json.load(open(f))['streams'].items()}) for f in sorted(glob.glob(sys.argv[1]+'/*/summary.json'))]" ~/rwr_humble_ws/work/ape_previews/s92_<date>_test`
+      Report both groups' numbers per stream (the first 3 demos: encoding held; the last 3: encoding running).
+- [ ] Start a policy in preview (card 4) while a demo is being encoded: the info line says "Background encoding
+      paused: a policy is running", the demo goes back to *waiting to encode*; after stopping the policy it is
+      encoded again. (Skip if no policy is at hand.)
+- [ ] Press *Transfer new demos*: if a demo is still being encoded the line says "Transfer asked for", and the
+      transfer starts right after it. The bar above the table fills to 100 %, the demos show *copying…* and then
+      *verified*; the log (card 3, *Transfer and clear log*) shows only the `archive/` rsync, "Verified on the Training
+      machine: N of N demo(s)" and, if `archive_after_transfer` is set, "After-transfer step started".
+- [ ] Get the person's OK, then *Clear transferred demos*: the demos show *cleared here*, `data/raw/<session>/` no
+      longer holds their `.h5`, `data/archive/<session>/` still does, and *View* still plays them (title "(from the
+      video archive)").
+- [ ] Report back: the encode times, the gap table from above, whether the live view or the arm stalled while
+      recording, and anything unexpected.

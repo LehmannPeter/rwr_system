@@ -83,7 +83,7 @@ def run():
             r = api("/api/inference/cmd/start", {"override": True}); assert "ERR" not in r, r
             assert wait(lambda: ev()["state"] == "running"); time.sleep(0.5)
             if i == 0:
-                print("processing during a run ->", api("/api/datasets/nope/process").get("ERR")); feeding["move"] = False   # arm and hand stand still: the automatic measure must see it
+                print("transfer asked for during a run ->", api("/api/datasets/nope/transfer").get("ERR") or "accepted"); feeding["move"] = False   # arm and hand stand still: the automatic measure must see it
             if i == 0 and DEMO is not None:   # the count must go up while the demo plays, not after it
                 seen = []
                 for _ in range(int(seconds * 4)):
