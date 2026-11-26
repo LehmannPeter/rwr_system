@@ -107,3 +107,66 @@ Report back in `ROBOT_PC_STATE.md`:
 - from the upload log (step 4): runs verified, `policy_log.h5` files written, runs without an inference log, and the size of one `policy_log.h5` next to the size of its inference log;
 - if step 5 was done: the ffmpeg CPU load, prediction time before and during, `video_frames_lost`, MB per minute of the two videos, and whether `veryfast` was needed;
 - anything blocked, and why.
+
+## 2026-11-26-02: Archive-only transfer: check the setting, turn on the after-transfer step
+Why: the team switched to archive-only transfer on 2026-11-25. The Training machine rebuilds the 10 Hz processed files from the video archive (`src/logger/rebuild_processed.py`; tested there: everything except the images is bit-identical to this PC's processed files), backs the archive up to Hugging Face and merges `manifest.csv`. With the new setting `archive_after_transfer`, *Process and check new demos* starts that work on the Training machine right after each verified transfer, so nobody has to run it by hand. Code: commit `5bb3d87` on `main`. Without the new setting nothing changes.
+Steps:
+1. Do this between two sessions, after 2026-11-26-01. Ask the person at the station before step 3: it restarts APE, and a restart stops every launch APE started. No policy may be running, no demo may be being recorded or saved, and no *Process* or *Clear* job may be running.
+2. In the `rwr_system` checkout APE runs from: `git status --short`. If it lists changes to tracked files under `ape_ui/`, `src/logger/`, `experiments/` or `CLAUDE.md`, stop and report them (blocked); do not commit, stash or discard them. Otherwise: `git fetch origin && git merge --ff-only origin/main`, then `git log -1 --oneline` must show `5bb3d87` or a later commit. If the fast-forward is refused, stop and report the message (blocked).
+3. In `ape_ui/static/local/station.json` (git-ignored, do not commit; keep every other key):
+   - `archive_transfer_processed` must be `false`. Note its value before you change anything; set it to `false` if it is missing or `true`.
+   - add `"archive_after_transfer": "~/rwr_task2/after_transfer.sh"`.
+   - leave `archive_require_hf_backup` as it is (2026-11-26-03 turns it on).
+   Restart APE (`ape_ui/run.sh`).
+4. Follow section 7 of `ape_ui/TEST_VIDEO_ARCHIVE.md`, skipping its first two items (the code is already on this checkout and the setting is set). Use a new short test session with 2–3 demos, and get the person's OK before its *Clear* item. The log of *Process and check new demos* must show only the `archive/` rsync (no `processed/` rsync), "Verified on the Training machine: N of N demo(s)", and then "After-transfer step started on the Training machine". The Training machine's `~/rwr_task2/logs/after_transfer/latest.log` is checked there (ask David or Johan, or check it over ssh: `ssh <archive_host> 'tail -30 ~/rwr_task2/logs/after_transfer/latest.log'`). It must show merge-manifest and hf-backup "ok"; rebuild is either "ok" or "SKIPPED, no memory budget … retried" (it waits while training runs fill the Training machine, and is retried every 10 minutes), and then "after_transfer done" or "still to run: rebuild".
+5. Do not use *Upload to Hugging Face* (`rwr_data.py push`) for new sessions any more: it uploads raw and processed files, and its `manifest.csv` would replace the merged one on the Hub. The Training machine backs up the archive.
+Report back in `ROBOT_PC_STATE.md`:
+- the commit of the code checkout after step 2;
+- the value `archive_transfer_processed` had before step 3, and the keys you changed (not the file);
+- the result of each section 7 item, and the last line of the job log ("After-transfer step started …" or "… not started …" with its reason);
+- anything blocked, and why.
+
+## 2026-11-26-03: Clear only demos that are backed up on Hugging Face
+Why: `archive_require_hf_backup` has been `false` since 2026-11-25 because the archive was not backed up yet. Since 2026-11-25 16:37 the Training machine backs up every archive to Hugging Face and writes a marker per demo after checking the Hub's sha256 (92 of 92 demos as of 2026-11-26). With the setting back on, *Clear transferred demos* deletes a demo here only when it is verified on the Training machine **and** backed up on Hugging Face.
+Steps:
+1. After 2026-11-26-02 passed. Ask the person at the station before the restart in step 2 (same conditions as in 2026-11-26-02, step 1).
+2. In `ape_ui/static/local/station.json` set `"archive_require_hf_backup": true` (or remove the key; true is the default). Restart APE.
+3. Follow section 8 of `ape_ui/TEST_VIDEO_ARCHIVE.md`. Get the person's OK before each *Clear*.
+4. From now on a demo that shows *verified* but not *verified + HF* stays on this PC; that is expected for a few minutes after each transfer, until the after-transfer step on the Training machine has backed it up.
+Report back in `ROBOT_PC_STATE.md`:
+- the result of each section 8 item;
+- per session still on this PC: how many demos show *verified + HF*;
+- anything blocked, and why.
+
+## 2026-11-26-04: Test APE on branch `ape-background`: background encoding, *Transfer new demos*, View from the raw file
+Done by hand at the station on 2026-11-26 (section 9); nothing more to do for this instruction.
+Why: so that a session is ready to transfer the moment it ends. On branch `ape-background`, APE encodes each demo into its video archive in the background as soon as it is saved (suspended while a demo is recorded, reviewed or saved), checks the raw file afterwards, and no longer processes anything on this PC. *Process and check new demos* becomes *Transfer new demos*, *Upload to Hugging Face* is gone, each demo shows its progress, *View* plays the raw file right after the save, and *Clear* keeps the video archive (about 2 MB per second of recording: 15 MB for a short demo, 350 MB for a 3-minute run) so cleared demos can still be viewed. Tested on the Training machine without ROS (51 of 51 checks); not yet run here or in a browser. The branch is merged into `main` only after this test passes.
+Steps:
+1. Between two sessions, after 2026-11-26-02 passed. Ask the person at the station before step 2: it restarts APE, and a restart stops every launch APE started. No policy may be running, no demo may be being recorded or saved, and no *Process*, *Clear* or evaluation upload job may be running.
+2. In the `rwr_system` checkout APE runs from: `git status --short`. If it lists changes to tracked files under `ape_ui/`, `src/logger/`, `experiments/` or `CLAUDE.md`, stop and report them (blocked); do not commit, stash or discard them. Otherwise: note the branch and commit (`git status -sb`, `git log -1 --oneline`), then `git fetch origin && git switch ape-background` (it creates the local branch from `origin/ape-background`). `git status -sb` must show `## ape-background...origin/ape-background` and `ls ape_ui/background.py` must find the file; if not, `git switch main` and stop (blocked). Restart APE (`ape_ui/run.sh`, with its full path).
+3. Follow section 9 of `ape_ui/TEST_VIDEO_ARCHIVE.md` with a new test session (e.g. `s92_<date>_test`). Recording the test demos moves the robot: only with the usual two people, one at the stop button. The stream-gap item restarts APE twice (once with `APE_ENCODE_WHILE_RECORDING=1`, once without): ask the person before each restart, and make sure APE runs without the variable at the end.
+4. Get the person's OK before *Clear transferred demos*. Clear only the test session.
+5. If any item of section 9 fails, or APE does not start or behaves wrongly on this branch: stop testing, ask the person, then go back to `main`: `git switch main && git merge --ff-only origin/main`, restart APE, and check that card 3 shows *Process and check new demos* again. Leave the test session's files as they are (do not clear them on `main` without the person's OK).
+6. If every item passed: stay on `ape-background` for now. Switching back to `main` after the merge comes in a later instruction.
+Report back in `ROBOT_PC_STATE.md`:
+- the branch and commit before step 2, and the commit of `ape-background` used;
+- the result of each section 9 item, including the encode time per demo and the table of largest stream gaps (first group: encoding held during recording; second group: encoding running);
+- whether the live view, the stream rates or the arm stalled during any recording;
+- if step 5 was needed: which item failed, what happened, and that APE runs on `main` again;
+- anything blocked, and why.
+
+## 2026-11-26-05: Test APE on branch `ape-discard`: each demo copied when encoded, *Discard* next to *View*
+Why: so that a session needs no transfer at its end, and a bad demo can be dropped from the list. Branch `ape-discard` contains `ape-background` (2026-11-26-04) and adds: each demo is copied to the Training machine and verified as soon as it is encoded (only that demo's files, about 350 MB for a 3-minute demo, suspended during recordings like the encode; off with `"archive_copy_each_demo": false` in `station.json`); a *Discard* button per demo (sets `keep` to `discard` in `manifest.csv`, *Undo* sets it back): a discarded demo is not encoded, copied or checked, and *Clear* deletes its raw file even if it was never copied; one that is already on the Training machine stays there, and the merge there now takes this PC's `keep` value, so it is left out of dataset versions. Precondition, on the Training machine, in place before this instruction was pushed: the merge takes this PC's `keep` value (rwr_il branch `manifest-keep`). Section 9 (2026-11-26-04) was done by hand on `ape-background` on 2026-11-26, so only section 10 is tested here. Tested on the Training machine without ROS (39 of 39 checks, and section 9's test 51 of 51 on this branch); not yet run here or in a browser. Merged into `main` only after this test passes.
+Steps:
+1. Between two sessions, after 2026-11-26-02 passed. Ask the person at the station before step 2: it restarts APE, and a restart stops every launch APE started. No policy may be running, no demo may be being recorded or saved, and no *Transfer*, *Clear* or evaluation upload job may be running.
+2. In the `rwr_system` checkout APE runs from: `git status --short`. If it lists changes to tracked files under `ape_ui/`, `src/logger/`, `experiments/` or `CLAUDE.md`, stop and report them (blocked); do not commit, stash or discard them. Otherwise: note the branch and commit, then `git fetch origin && git switch ape-discard`. `git status -sb` must show `## ape-discard...origin/ape-discard` and `grep -c copy_command ape_ui/station_data.py` must print a number above 0; if not, switch back to the branch noted and stop (blocked). Restart APE (`ape_ui/run.sh`, with its full path).
+3. Follow section 10 of `ape_ui/TEST_VIDEO_ARCHIVE.md` with a new test session (e.g. `s93_<date>_test`). Recording the test demos moves the robot: only with the usual two people, one at the stop button.
+4. Get the person's OK before every *Clear transferred demos*, and clear only the test session. On this branch *Clear* also deletes the raw files of discarded demos that were never copied: those are then gone for good.
+5. If an item of section 10 fails, or APE does not start or behaves wrongly on this branch: stop testing, ask the person, then go back to `ape-background`: `git switch ape-background`, restart APE, and check that card 3 has no *Discard* button. Leave the test session's files as they are.
+6. If every item passed: stay on `ape-discard`. Switching back to `main` after the merge comes in a later instruction.
+Report back in `ROBOT_PC_STATE.md`:
+- the branch and commit before step 2, and the commit of `ape-discard` used;
+- the result of each section 10 item, including the copy time per demo;
+- whether the live view, the stream rates or the arm stalled during any recording;
+- if step 5 was needed: which item failed, what happened, and which branch APE runs on now;
+- anything blocked, and why.
