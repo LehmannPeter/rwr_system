@@ -408,10 +408,17 @@ the job's exit code is unchanged. On the Training machine, `~/rwr_task2/after_tr
 It detaches itself, then runs the three steps, each under `src/logger/supervise_job.sh` (16 GiB per job, nice 19,
 CPU only; killed above 130 GiB unreclaimable or 150 GiB total in the container, so training runs are never the ones
 that run out of memory). The rebuild uses `--jobs 2` (a 3-minute demo needs about 6.2 GiB). A failed or killed step
-is logged and the next one still runs. One run at a time (flock in `/tmp`); a trigger during a run asks for one more
-pass at the end. Log: `~/rwr_task2/logs/after_transfer/<date-time>.log` and `latest.log`. Nothing keeps running
-after the last step; if the instance restarts mid-run, the next transfer (or running the wrapper by hand) finishes
-the work. By hand: `~/rwr_task2/after_transfer.sh` (returns at once) or `~/rwr_task2/after_transfer.sh --foreground`.
+is logged and the next one still runs. A step only starts if the container's unreclaimable memory plus the step's
+budget (1 GiB for the merge and for the backup, 16 GiB per rebuild job) stays under 150 GiB. Otherwise it is logged
+as "SKIPPED, no memory budget" and retried every 10 minutes until it has run, together with any step the supervisor
+did not start or killed because of container memory; steps that already succeeded are not repeated. The merge and
+the backup (each under 1 GiB) run with raised supervisor limits (refused or killed above 150 GiB unreclaimable or
+above 2 GiB of their own; the container total, mostly file cache, is not limited for them), so training load does
+not hold up the Hugging Face backup; the rebuild keeps the default limits (130 GiB unreclaimable / 150 GiB total) and can come hours after the transfer while training fills the container.
+Check `latest.log` (or the *HF* state of the demos) before *Clear*. One run at a time
+(flock in `/tmp`); a trigger during a run asks for one more full pass. Log:
+`~/rwr_task2/logs/after_transfer/<date-time>.log` and `latest.log`. Nothing keeps running after the last step or the
+last retry; if the instance restarts mid-run, the next transfer (or running the wrapper by hand) finishes the work. By hand: `~/rwr_task2/after_transfer.sh` (returns at once) or `~/rwr_task2/after_transfer.sh --foreground`.
 
 Switching a station: set `"archive_transfer_processed": false` in `static/local/station.json` (only between sessions,
 see `TEST_VIDEO_ARCHIVE.md`, section 7). The Robot PC still synchronises and checks every demo locally (previews,
