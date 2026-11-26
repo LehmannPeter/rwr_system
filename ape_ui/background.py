@@ -1,8 +1,16 @@
-"""Background work on recorded demos (APE): encode each new demo into its video archive as soon as it is saved, then
-check its raw file, one demo at a time, at the lowest CPU priority. Starts the transfer to the Training machine when
-it is asked for.
+"""Background work on recorded demos (APE): encode each new demo into its video archive as soon as it is saved, copy
+it to the Training machine as soon as it is encoded, then check its raw file, one task at a time, at the lowest CPU
+priority. Starts the full transfer (card 3) when it is asked for.
 
-- Encoding comes first (it is what the transfer needs); checks run only when nothing is left to encode.
+- Order: copy what is encoded and not yet on the Training machine (short: about 350 MB for a 3-minute demo), then
+  encode, then check. The copy (archive_job.py transfer --no-encode --demo ...) sends and verifies only those demos'
+  files plus manifest.csv, and starts the after-transfer step there. It needs archive_host and is on unless
+  archive_copy_each_demo is false. It takes only demos never verified before (a demo that once failed to verify,
+  e.g. one that differs on the Training machine, is left to Transfer new demos); one whose copy did not verify is
+  tried again after COPY_RETRY_S, at most COPY_TRIES times per APE run.
+- Demos marked keep=discard in manifest.csv are not encoded, copied or checked; discarding the demo being encoded
+  stops it (cancel()). A discard (or undo) of a demo already on the Training machine sends manifest.csv again
+  (request_copy()), so the merge there leaves it out of dataset versions.
 - Nothing runs while a policy runs or an evaluation records (a running encode is stopped and redone later), nor while
   a card-3 job (transfer, clear, evaluation upload) runs.
 - While a demo is being recorded, reviewed or saved, the running task is suspended (SIGSTOP) and continued (SIGCONT)
@@ -30,6 +38,8 @@ from encode_archive import is_archived  # noqa: E402
 
 NICE = ["nice", "-n", "19"]
 ENCODE_THREADS = 4
+COPY_RETRY_S = 600   # a copy that left demos unverified (network down, ...) is tried again after this
+COPY_TRIES = 3       # automatic copies of one demo per APE run
 
 
 def progress_of(archive_dir, stem):
@@ -53,6 +63,9 @@ class Background:
         self.current = None                     # {"task", "session", "stem", "proc", "started"}
         self.wanted = []                        # sessions whose transfer was asked for, oldest first
         self.check_failed = set()               # (session, stem) whose check crashed without a result
+        self.copy_wanted = {}                   # session -> set of stems whose manifest change must reach the Training machine
+        self.copy_after = {}                    # session -> time before which no automatic copy is tried again
+        self.copy_tries = {}                    # (session, stem) -> automatic copies finished in this APE run
         self.note = ""                          # why it is waiting, for the page
         self._wake = threading.Event()
         self._lock = threading.Lock()
@@ -85,6 +98,21 @@ class Background:
     def wake(self):
         self._wake.set()
 
+    def cancel(self, session, stem):
+        """The demo was discarded: stop its running task (not redone, discarded demos are skipped)."""
+        with self._lock:
+            c = self.current
+            if c and c["session"] == session and stem in c["stems"] and c["task"] in ("encode", "check"):
+                c["cancel"] = True
+        self.wake()
+
+    def request_copy(self, session, stem):
+        """Send manifest.csv (and verify this demo) soon: its keep value changed after it was copied."""
+        with self._lock:
+            self.copy_wanted.setdefault(session, set()).add(stem)
+            self.copy_after.pop(session, None)
+        self.wake()
+
     def request_transfer(self, session):
         with self._lock:
             if session not in self.wanted:
@@ -94,7 +122,8 @@ class Background:
     def info(self):
         c = self.current
         return {"task": c["task"] if c else "", "session": c["session"] if c else "", "demo": c["stem"] if c else "",
-                "transfer_wanted": list(self.wanted), "note": self.note}
+                "demos": list(c["stems"]) if c else [], "transfer_wanted": list(self.wanted), "note": self.note,
+                "copy_each": bool(self.station.copy_enabled())}
 
     # -- work selection ----------------------------------------------------------------------
     def _raw_files(self):
@@ -112,13 +141,48 @@ class Background:
         except Exception:
             return False
 
+    def _status(self, session, stem):
+        try:
+            return json.loads((self.station.archive_status / session / f"{stem}.json").read_text())
+        except Exception:
+            return {}
+
+    def _to_copy(self, files, dropped):
+        """(session, [stems]) to copy now, or None: encoded demos of a session with a raw file here, not discarded, not
+        verified on the Training machine and either never compared with it or copied by this worker fewer than
+        COPY_TRIES times; or demos whose keep value changed (copy_wanted)."""
+        if not self.station.copy_enabled():
+            return None
+        now = time.time()
+        with self._lock:
+            for session, stems in self.copy_wanted.items():
+                if stems:
+                    return session, sorted(stems)
+        sessions = {}
+        for session, f in files:
+            if (session, f.stem) in dropped or self.copy_after.get(session, 0) > now:
+                continue
+            st = self._status(session, f.stem)
+            tries = self.copy_tries.get((session, f.stem), 0)
+            fresh = "verified" not in st if not tries else tries < COPY_TRIES
+            if fresh and (st.get("archive") or {}).get("ok") and not (st.get("verified") or {}).get("ok") \
+                    and not st.get("cleared") and is_archived(f, self.station.data / "archive" / session):
+                sessions.setdefault(session, []).append(f.stem)
+        return next(iter(sessions.items()), None)   # newest session first (files is ordered so)
+
     def next_task(self):
         files = self._raw_files()
+        dropped = self.station.discarded()
+        copy = self._to_copy(files, dropped)
+        if copy:
+            return "copy", copy[0], copy[1]
         for session, f in files:
+            if (session, f.stem) in dropped:
+                continue
             if not is_archived(f, self.station.data / "archive" / session) and not self._archive_failed(session, f.stem):
                 return "encode", session, f
         for session, f in files:
-            if (session, f.stem) in self.check_failed:
+            if (session, f.stem) in self.check_failed or (session, f.stem) in dropped:
                 continue
             if not (self.station.previews / session / f.stem / "summary.json").is_file():
                 return "check", session, f
@@ -155,29 +219,33 @@ class Background:
             return
         self.note = ""
         kind, session, raw = task
-        if kind == "encode":
+        if kind == "copy":
+            self._copy(session, raw)
+        elif kind == "encode":
             self._encode(session, raw)
         else:
             self._check(session, raw)
 
-    def _run(self, kind, session, raw, argv):
+    def _run(self, kind, session, stems, argv):
         """Run one task in its own process group, stopped when a policy starts (a transfer that is asked for waits
-        for it). Returns the exit code, or None if it was stopped."""
+        for it) or when its demo is discarded. Returns the exit code, or None if it was stopped."""
+        label = f"{session}/{','.join(stems)}"
         log = open(self.log_file, "a")
-        log.write(f"\n--- {time.strftime('%F %T')} {kind} {session}/{raw.stem}: {' '.join(map(str, argv))}\n")
+        log.write(f"\n--- {time.strftime('%F %T')} {kind} {label}: {' '.join(map(str, argv))}\n")
         log.flush()
         # its own process group (stopped as a whole), but in APE's session, so whatever supervises APE sees it
         proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, process_group=0,
                                 cwd=str(self.station.workspace))
-        self.current = {"task": kind, "session": session, "stem": raw.stem, "proc": proc, "started": time.time()}
+        self.current = {"task": kind, "session": session, "stem": stems[0] if len(stems) == 1 else "", "stems": list(stems),
+                        "proc": proc, "started": time.time()}
         stopped = False
         c = self.current
         signal_group = lambda sig: self._signal(proc, sig)
         try:
             while proc.poll() is None:
-                reason = self.paused()
+                reason = self.paused() or ("its demo was discarded" if c.get("cancel") else "")
                 if reason and not stopped:
-                    self._log(f"{kind} {session}/{raw.stem} stopped: {reason} (redone later)")
+                    self._log(f"{kind} {label} stopped: {reason}" + ("" if c.get("cancel") else " (redone later)"))
                     with self._lock:
                         if c.get("held"):
                             signal_group(signal.SIGCONT)   # a stopped process only acts on SIGTERM once continued
@@ -191,7 +259,7 @@ class Background:
                     with self._lock:
                         signal_group(signal.SIGCONT); c["held"] = False
                     self.note = ""
-                    self._log(f"{kind} {session}/{raw.stem} continued")
+                    self._log(f"{kind} {label} continued")
                 time.sleep(0.1 if c.get("held") else 0.5)
         finally:
             with self._lock:
@@ -213,7 +281,7 @@ class Background:
         archive = self.station.data / "archive" / session
         argv = [*NICE, sys.executable, "-u", str(LOGGER_DIR / "encode_archive.py"), str(raw), "-o", str(archive),
                 "--skip-existing", "--jobs", "1", "--threads", str(ENCODE_THREADS)]
-        code = self._run("encode", session, raw, argv)
+        code = self._run("encode", session, [raw.stem], argv)
         if code is None:   # stopped: remove what the stopped encode left (redone from scratch later)
             for left in archive.glob(f".{raw.stem}.*"):
                 shutil.rmtree(left, ignore_errors=True) if left.is_dir() else left.unlink(missing_ok=True)
@@ -225,10 +293,28 @@ class Background:
         out = self.station.previews / session / raw.stem
         out.parent.mkdir(parents=True, exist_ok=True)
         argv = [*NICE, sys.executable, str(self.station.inspect_script), str(raw), "--output", str(out)]
-        code = self._run("check", session, raw, argv)
+        code = self._run("check", session, [raw.stem], argv)
         if code is not None and not (out / "summary.json").is_file():
             self.check_failed.add((session, raw.stem))
             self._log(f"check of {session}/{raw.stem} gave no result (exit {code})")
+
+    def _copy(self, session, stems):
+        with self._lock:
+            wanted = self.copy_wanted.pop(session, set())
+        argv = [*NICE, *self.station.copy_command(session, stems)]
+        code = self._run("copy", session, stems, argv)
+        if code is None:   # stopped for a policy: tried again later
+            with self._lock:
+                self.copy_wanted.setdefault(session, set()).update(wanted)
+            return
+        for s in stems:
+            self.copy_tries[(session, s)] = self.copy_tries.get((session, s), 0) + 1
+        left = [s for s in stems if not (self._status(session, s).get("verified") or {}).get("ok")
+                and not ((session, s) in self.station.discarded())]
+        if code or left:
+            self.copy_after[session] = time.time() + COPY_RETRY_S
+            self._log(f"copy {session}: exit {code}, not verified: {', '.join(left) or '-'}; "
+                      f"tried again in {COPY_RETRY_S // 60} min (or with Transfer new demos)")
 
     def _log(self, text):
         try:

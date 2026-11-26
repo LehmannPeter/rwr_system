@@ -1453,7 +1453,7 @@ def status():
         "disk_free_gb": round(usage.free / 1e9, 1),
         "datasets_dir": str(RAW),
         "hf_repo": station.hf_repo(),
-        "features": ["lighting", "meta", "description", "orientation", "inference", "timing", "eval", "mover", "eval_upload", "background"],
+        "features": ["lighting", "meta", "description", "orientation", "inference", "timing", "eval", "mover", "eval_upload", "background", "discard"],
         "background": bg.info(),
         "eval": {**evals.info(), "live": live.info()},
         "time": time.time(),
@@ -1994,10 +1994,39 @@ def dataset_transfer(dataset: str):
             else "The transfer starts after the other job in card 3." if job.running else ""}
 
 
+@app.post("/api/datasets/{dataset}/demos/{demo}/keep")
+async def demo_keep(dataset: str, demo: str, request: Request):
+    """Discard a demo (keep=discard in manifest.csv) or undo it (keep). A discarded demo is not encoded, copied or
+    checked, and Clear deletes its raw file even if it never reached the Training machine. If it is already there,
+    manifest.csv is sent again right away, so it is left out of dataset versions there too."""
+    body = await request.json()
+    value = str(body.get("keep") or "").strip().lower()
+    if job.running and job.dataset == "clear " + dataset:
+        raise HTTPException(409, "Clear is running on this session: try again when it has finished.")
+    try:
+        old = station.set_keep(dataset, demo, value)
+    except DataError as exc:
+        raise HTTPException(400, str(exc))
+    st = station.archive_state(dataset, demo) or {}
+    on_training = st.get("state") in ("verified", "cleared")
+    if value == "discard":
+        bg.cancel(dataset, demo)
+    if on_training and old != value:
+        bg.request_copy(dataset, demo)
+    bg.wake()
+    if value == "discard":
+        note = ("Discarded. It is on the Training machine already: manifest.csv goes there next, so it is left out of "
+                "dataset versions." if on_training else
+                "Discarded: it is not copied, and Clear deletes its raw file." + (" Undo is possible until then." if st.get("state") != "cleared" else ""))
+    else:
+        note = "Kept again." + (" manifest.csv goes to the Training machine next." if on_training else " It is encoded and copied as usual.")
+    return {"keep": value, "old": old, "note": note}
+
+
 @app.post("/api/datasets/{dataset}/clear")
 def dataset_clear(dataset: str):
-    """Delete the local raw, processed and archive files of the demos whose files all match on the Training
-    machine. archive_job.py compares the checksums again right before deleting."""
+    """Delete the local raw (and old processed) files of the demos whose files all match on the Training machine, and
+    of discarded demos. archive_job.py compares the checksums again right before deleting; archives stay."""
     if job.running:
         raise HTTPException(409, "Another job is still running.")
     if inference.policy_on:

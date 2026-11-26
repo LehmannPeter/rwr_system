@@ -128,3 +128,27 @@ before any *Clear*.
       video archive)").
 - [ ] Report back: the encode times, the gap table from above, whether the live view or the arm stalled while
       recording, and anything unexpected.
+
+## 10. Copy each demo when encoded, *Discard* (between sessions, after section 9)
+On branch `ape-discard` (contains `ape-background`). Recording the test demos moves the robot (two people). Get the
+person's OK before any *Clear*; *Clear* only on the test session.
+- [ ] The checkout APE runs from is on `ape-discard`; APE restarted. Card 3 shows *Discard* next to *View*, and the
+      info line says "Each demo is copied as soon as it is encoded".
+- [ ] Record 3 short demos (about 30 s) in a new test session. After each save, without pressing anything: *encoding
+      NN %*, then *copying…*, then *verified* (and later *verified + HF*). `work/ape_background.log` has one `--- copy`
+      line per demo with `--no-encode --demo <that demo>`. Note how long a copy takes (its `--- copy` and `--- exit`
+      lines).
+- [ ] Start a recording while a demo is *copying…* (if one is caught): the copy is suspended like an encode and
+      finishes after the save.
+- [ ] Record a 4th demo and press *Discard* on it before it is encoded (right after the save): it shows *discarded,
+      not copied; Clear deletes it*, it is not encoded, and it is not on the Training machine.
+- [ ] Press *Discard* on one of the verified demos: the note says it stays on the Training machine but is left out of
+      dataset versions; within about a minute the Training machine's `manifest.csv` says `discard` for it (ask
+      there, or `~/rwr_task2/logs/after_transfer/latest.log` shows "keep value(s) taken from the Robot PC"). Then
+      *Undo*: it says `keep` there again.
+- [ ] Press *Transfer new demos*: the log says "Not encoded (discarded)" / "Not copied (discarded)" for the discarded
+      demo, and nothing is left to copy for the others.
+- [ ] Get the person's OK, then *Clear transferred demos*: the confirmation names the verified and the discarded demos
+      separately; afterwards the verified ones show *cleared here*, the discarded never-copied one *deleted here*, and
+      their `.h5` files are gone from `data/raw/<session>/`.
+- [ ] Report back: copy times, whether anything stalled while recording, and anything unexpected.

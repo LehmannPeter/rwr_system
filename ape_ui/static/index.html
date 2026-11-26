@@ -130,6 +130,7 @@ table.t { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 table.t th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12.5px; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 table.t td { padding: 5px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
 table.t td.r, table.t th.r { text-align: right; }
+table.t td.nowrap { white-space: nowrap; }
 table.t tr.sel td { background: var(--idle-bg); }
 .scroll { overflow-x: auto; }
 .tag-ok { color: var(--ok); font-weight: 600; } .tag-bad { color: var(--bad); font-weight: 600; } .tag-warn { color: var(--warn); font-weight: 600; }
@@ -790,41 +791,63 @@ function renderDemos() {
   const d = DS.find(x => x.name === $('ds-select').value);
   if (!d) { $('demo-table').innerHTML = ''; $('ds-info').textContent = 'No recordings yet.'; $('ds-process').disabled = true; return; }
   const copying = JOB_DS === 'transfer ' + d.name, queued = (BG.transfer_wanted || []).includes(d.name);
-  const notCopied = d.demos.filter(m => !m.archive || !['verified', 'cleared'].includes(m.archive.state)).length;
-  const total = d.demos.length ? d.demos.reduce((s, m) => s + demoProgress(m, copying), 0) / d.demos.length : 1;
+  const bgCopy = BG.task === 'copy' && BG.session === d.name ? (BG.demos || []) : [];
+  const live = d.demos.filter(m => !m.discarded);   // discarded demos are not copied: they do not count
+  const notCopied = live.filter(m => !m.archive || !['verified', 'cleared'].includes(m.archive.state)).length;
+  const total = live.length ? live.reduce((s, m) => s + demoProgress(m, copying || bgCopy.includes(m.name)), 0) / live.length : 1;
   const work = d.to_encode ? `<b>${d.to_encode}</b> to encode. ` : '';
   const checks = d.to_check ? `${d.to_check} not checked yet (runs in the background after encoding). ` : '';
-  const state = copying ? 'Transferring now. ' : queued ? 'Transfer asked for: it starts after the demo being encoded. ' : '';
+  const state = copying ? 'Transferring now. ' : queued ? 'Transfer asked for: it starts after the demo being encoded. ' : bgCopy.length ? `Copying ${bgCopy.length === 1 ? bgCopy[0] : bgCopy.length + ' demos'} to the Training machine. ` : '';
+  const each = ARCHIVE_HOST_SET && BG.copy_each ? 'Each demo is copied as soon as it is encoded. ' : '';
+  const dropped = d.discarded ? `${d.discarded} discarded (not copied, left out of dataset versions${d.discard_clearable ? `; Clear deletes the raw file of ${d.discard_clearable}, ${d.discard_gb} GB` : ''}). ` : '';
   const paused = BG.note && BG.note.startsWith('paused') ? `<span class="tag-warn">Background encoding ${esc(BG.note)}.</span> ` : '';
   $('ds-info').innerHTML = (notCopied && ARCHIVE_HOST_SET ? `<div style="margin-bottom:6px">${pbar(100 * total, `${d.demos.length - notCopied} of ${d.demos.length} on the Training machine`)}</div>` : '')
-    + `${d.demos.length} demo${d.demos.length === 1 ? '' : 's'}, ${d.total_gb} GB on disk. ${state}${paused}${work}${checks}`
-    + (ARCHIVE_HOST_SET ? `${notCopied ? `<b>${notCopied}</b> not yet verified on the Training machine.` : 'All verified on the Training machine.'} ${d.clearable ? `${d.clearable} verified` + (ARCHIVE_REQUIRE_HF ? `, ${d.clearable_hf} of them also backed up on Hugging Face at the last check (clearing needs both; it checks again)` : '') + ` (${d.clearable_gb} GB).` : ''} ` : 'No Training machine set (<code>archive_host</code> in <code>static/local/station.json</code>): demos are archived but not copied. ')
+    + `${d.demos.length} demo${d.demos.length === 1 ? '' : 's'}, ${d.total_gb} GB on disk. ${state}${paused}${work}${checks}${dropped}`
+    + (ARCHIVE_HOST_SET ? `${each}${notCopied ? `<b>${notCopied}</b> not yet verified on the Training machine.` : `All ${d.discarded ? 'kept demos ' : ''}verified on the Training machine.`} ${d.clearable ? `${d.clearable} verified` + (ARCHIVE_REQUIRE_HF ? `, ${d.clearable_hf} of them also backed up on Hugging Face at the last check (clearing needs both; it checks again)` : '') + ` (${d.clearable_gb} GB).` : ''} ` : 'No Training machine set (<code>archive_host</code> in <code>static/local/station.json</code>): demos are archived but not copied. ')
     + `Training reads a dataset version built from <code>manifest.csv</code>, not this folder.`;
-  $('ds-clear').disabled = !ARCHIVE_HOST_SET || !d.clearable || JOB_RUNNING;
+  $('ds-clear').disabled = !ARCHIVE_HOST_SET || !(d.clearable || d.discard_clearable) || JOB_RUNNING;
   let h = '<tr><th>Demo</th><th>Name in dataset versions</th><th>Colour</th><th class="r">Raw GB</th><th class="r">Length</th><th class="r">Frames</th><th>Check</th><th>Archive / Training machine</th><th></th></tr>';
-  const ARC = {archived: ['muted', 'encoded'], archive_failed: ['tag-bad', 'encoding failed'], not_verified: ['tag-warn', 'not verified'], verified: ['tag-ok', 'verified'], verified_hf: ['tag-ok', 'verified + HF'], cleared: ['tag-ok', 'cleared here']};
+  const ARC = {deleted: ['muted', 'deleted here'], archived: ['muted', 'encoded'], archive_failed: ['tag-bad', 'encoding failed'], not_verified: ['tag-warn', 'not verified'], verified: ['tag-ok', 'verified'], verified_hf: ['tag-ok', 'verified + HF'], cleared: ['tag-ok', 'cleared here']};
   for (const m of [...d.demos].reverse()) {
     const c = m.check, a = m.archive, w = m.work;
     const chk = c ? (c.ok ? '<span class="tag-ok">ok</span>' : `<span class="tag-bad" title="${esc(c.errors.join('\n'))}">problems: ${esc(c.errors[0] || '')}</span>`)
       : w && w.task === 'check' ? '<span class="muted">checking…</span>' : m.raw_gb != null ? '<span class="muted">waiting</span>' : '<span class="muted">–</span>';
     const key = a ? (a.state === 'verified' && a.hf ? 'verified_hf' : a.state) : '';
-    const arc = w && w.task === 'encode' ? pbar(w.pct || 0, `encoding ${w.pct || 0} %`)
+    const onTM = a && ['verified', 'cleared'].includes(a.state);
+    const arc = m.discarded && !(w && w.task === 'encode') ? (onTM ? `<span class="tag-warn" title="${esc(a.text)}">discarded</span> <span class="muted">on the Training machine, left out of datasets${a.state === 'cleared' ? ', cleared here' : ''}</span>`
+          : `<span class="tag-warn">discarded</span> <span class="muted">${m.raw_gb != null ? 'not copied; Clear deletes it' : a && a.state === 'deleted' ? 'never copied, deleted here' : 'not copied'}</span>`)
+      : w && w.task === 'encode' ? pbar(w.pct || 0, `encoding ${w.pct || 0} %`)
       : w && w.task === 'wait_encode' ? '<span class="muted">waiting to encode</span>'
-      : copying && a && ['archived', 'not_verified'].includes(a.state) ? '<span class="muted">copying…</span>'
+      : (copying || bgCopy.includes(m.name)) && a && ['archived', 'not_verified'].includes(a.state) ? '<span class="muted">copying…</span>'
       : !a ? '<span class="muted">not encoded</span>'
       : `<span class="${ARC[key][0]}" title="${esc(a.text)}">${ARC[key][1]}</span>${a.archive_mb != null ? ' <span class="muted">' + a.archive_mb + ' MB</span>' : ''}`;
-    h += `<tr class="${PL && PL.demo === m.name && PL.dataset === d.name ? 'sel' : ''}"><td title="${esc(m.description || '')}">${esc(m.name)}${m.description ? ' <span class="muted" title="' + esc(m.description) + '">✎</span>' : ''}</td><td>${m.dataset_name ? esc(m.dataset_name) : '<span class="muted">–</span>'}</td><td>${m.colour ? esc(m.colour) : '<span class="muted">–</span>'}${m.keep && m.keep !== 'keep' ? ' <span class="muted">(' + esc(m.keep) + ')</span>' : ''}</td><td class="r">${m.raw_gb == null ? '–' : m.raw_gb.toFixed(2)}</td><td class="r">${c && c.duration_s != null ? mmss(c.duration_s) : '–'}</td><td class="r">${c && c.frames != null ? c.frames : '–'}</td><td>${chk}</td><td>${arc}</td><td class="r">${m.viewable ? `<button data-demo="${esc(m.name)}" title="${m.raw_gb != null ? 'Plays the raw recording' : 'Plays the video archive (the raw recording is cleared)'}">View</button>` : ''}</td></tr>`;
+    const gone = m.discarded && !m.viewable;
+    const keepBtn = !m.in_manifest ? '' : m.discarded
+      ? `<button data-keep="keep" data-demo="${esc(m.name)}" title="Undo the discard: the demo is kept, encoded and copied as usual"${gone ? ' disabled' : ''}>Undo</button>`
+      : `<button data-keep="discard" data-demo="${esc(m.name)}" title="Leave this demo out: not copied, not in dataset versions; Clear deletes its raw file">Discard</button>`;
+    h += `<tr class="${PL && PL.demo === m.name && PL.dataset === d.name ? 'sel' : ''}"><td title="${esc(m.description || '')}">${esc(m.name)}${m.description ? ' <span class="muted" title="' + esc(m.description) + '">✎</span>' : ''}</td><td>${m.dataset_name ? esc(m.dataset_name) : '<span class="muted">–</span>'}</td><td>${m.colour ? esc(m.colour) : '<span class="muted">–</span>'}${m.keep && m.keep !== 'keep' ? ' <span class="muted">(' + esc(m.keep) + ')</span>' : ''}</td><td class="r">${m.raw_gb == null ? '–' : m.raw_gb.toFixed(2)}</td><td class="r">${c && c.duration_s != null ? mmss(c.duration_s) : '–'}</td><td class="r">${c && c.frames != null ? c.frames : '–'}</td><td>${chk}</td><td>${arc}</td><td class="r nowrap">${m.viewable ? `<button data-demo="${esc(m.name)}" title="${m.raw_gb != null ? 'Plays the raw recording' : 'Plays the video archive (the raw recording is cleared)'}">View</button>` : ''} ${keepBtn}</td></tr>`;
   }
   $('demo-table').innerHTML = h;
-  for (const b of $('demo-table').querySelectorAll('button')) b.onclick = () => openDemo(d.name, b.dataset.demo);
+  for (const b of $('demo-table').querySelectorAll('button')) b.onclick = b.dataset.keep ? () => setKeep(d.name, b.dataset.demo, b.dataset.keep) : () => openDemo(d.name, b.dataset.demo);
   $('ds-process').disabled = copying || queued;
+}
+async function setKeep(dataset, demo, keep) {
+  const d = DS.find(x => x.name === dataset), m = d && d.demos.find(x => x.name === demo); if (!m) return;
+  const onTM = m.archive && ['verified', 'cleared'].includes(m.archive.state);
+  if (keep === 'discard' && !confirm(`Discard ${demo}?\n\n` + (onTM
+      ? 'It is already on the Training machine: it stays there, but is left out of dataset versions (manifest.csv is sent next).'
+      : 'It is not copied to the Training machine, and the next Clear deletes its raw file from this PC for good.') + '\n\nUntil then, Undo keeps it again.')) return;
+  const r = await post(`/api/datasets/${encodeURIComponent(dataset)}/demos/${encodeURIComponent(demo)}/keep`, {keep});
+  if (r && r.note) toast(r.note, true);
+  loadDatasets();
 }
 $('ds-select').onchange = () => { try { localStorage.setItem('ds', $('ds-select').value); } catch (e) {} renderDemos(); };
 $('ds-process').onclick = async () => { const n = $('ds-select').value; if (!n) return; $('job-details').open = true; const r = await post(`/api/datasets/${encodeURIComponent(n)}/transfer`); if (r && r.note) toast(r.note, true); loadDatasets(); };
 $('job-stop').onclick = () => post('/api/job/stop');
 $('ds-clear').onclick = async () => {
-  const d = DS.find(x => x.name === $('ds-select').value); if (!d || !d.clearable) return;
-  if (!confirm(`Delete the raw recordings of ${d.clearable} demo(s) of ${d.name} from this PC (${d.clearable_gb} GB)?\n\nOnly demos whose files are on the Training machine and match byte for byte${ARCHIVE_REQUIRE_HF ? ', and whose archive is backed up on Hugging Face,' : ''} are deleted; this is checked again right before deleting. The video archives (about 15 MB per demo, for View), the demo settings files and manifest.csv stay. This cannot be undone on this PC.`)) return;
+  const d = DS.find(x => x.name === $('ds-select').value); if (!d || !(d.clearable || d.discard_clearable)) return;
+  const what = [d.clearable ? `${d.clearable} demo(s) verified on the Training machine (${d.clearable_gb} GB)` : '', d.discard_clearable ? `${d.discard_clearable} discarded demo(s) (${d.discard_gb} GB)` : ''].filter(Boolean).join(' and ');
+  if (!confirm(`Delete the raw recordings of ${what} of ${d.name} from this PC?\n\nVerified demos: only those whose files are on the Training machine and match byte for byte${ARCHIVE_REQUIRE_HF ? ', and whose archive is backed up on Hugging Face,' : ''} are deleted; this is checked again right before deleting.` + (d.discard_clearable ? ' Discarded demos are deleted even if they were never copied: those are then gone for good.' : '') + ` The video archives (about 2 MB per second of recording, for View), the demo settings files and manifest.csv stay. This cannot be undone on this PC.`)) return;
   $('job-details').open = true; await post(`/api/datasets/${encodeURIComponent(d.name)}/clear`); loadDatasets();
 };
 async function openDemo(dataset, demo) {

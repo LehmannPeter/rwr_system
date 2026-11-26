@@ -10,8 +10,15 @@
                                                        files of every demo whose archive matches on the Training
                                                        machine and (by default) that is backed up on Hugging Face
                                                        (course rule: clear the Robot PC after each session). The
-                                                       archive (about 15 MB per demo), <demo>.meta.json and
-                                                       manifest.csv stay, so APE can still show the demo.
+                                                       archive (about 2 MB per second of recording), <demo>.meta.json
+                                                       and manifest.csv stay, so APE can still show the demo.
+                                                       Demos marked keep=discard in manifest.csv lose their raw and
+                                                       processed files too, copied or not.
+
+Discarded demos (keep=discard in this PC's manifest.csv) are not encoded and not copied by `transfer`; one that was
+copied before stays on the Training machine, where the merged manifest leaves it out of dataset versions.
+`transfer --no-encode --demo STEM [--demo STEM ...]` copies and verifies only those demos (APE's background worker
+runs it as soon as a demo is encoded); manifest.csv is always sent.
 
 Destination: --host (ssh target, e.g. an alias from ~/.ssh/config; for tests --local-dest instead) and
 --dest-root (data root there, default ~/rwr_task2/data). Files go to <dest-root>/archive/<session>/ and, unless
@@ -34,6 +41,7 @@ Plain Python (stdlib); needs rsync on both machines (3.2.3 or newer for --mkpath
 password prompt (BatchMode).
 """
 import argparse
+import csv
 import fcntl
 import hashlib
 import json
@@ -110,6 +118,7 @@ class Job:
         self.status_dir.mkdir(parents=True, exist_ok=True)
         self.hf_dir = self.status_dir / "hf"   # copies of the Hugging Face markers from the Training machine
         self.with_processed = not args.no_processed
+        self.only = set(args.demo or [])   # --demo: only these demos (transfer and verify)
         root = args.dest_root
         if args.host:
             # rsync over ssh starts in the remote home directory, so "~/x" and "x" are the same place;
@@ -138,6 +147,21 @@ class Job:
         save_status(self.status_dir, stem, **parts)
 
     # -- what belongs to a demo -----------------------------------------------------------
+    def discarded(self):
+        """Stems of this session marked keep=discard in this PC's manifest.csv."""
+        try:
+            with open(self.data / "manifest.csv", newline="") as f:
+                return {Path(r.get("file", "")).stem for r in csv.DictReader(f)
+                        if r.get("session") == self.session and (r.get("keep") or "").strip().lower() == "discard"}
+        except FileNotFoundError:
+            return set()
+
+    def only_filter(self):
+        """rsync filter rules limiting a transfer or comparison to the --demo stems (none = the whole session)."""
+        if not self.only:
+            return []
+        return [f"--include=/{stem}.*" for stem in sorted(self.only)] + ["--exclude=*"]
+
     def stems(self):
         found = {f.stem for f in self.raw.glob("*.h5")} if self.raw.is_dir() else set()
         found |= {f.stem for f in self.processed.glob("*.h5")} if self.processed.is_dir() else set()
@@ -167,7 +191,14 @@ class Job:
         if not self.raw.is_dir():
             print("No raw folder: nothing to encode.", flush=True)
             return 0
-        cmd = [sys.executable, "-u", str(LOGGER_DIR / "encode_archive.py"), str(self.raw), "-o", str(self.archive),
+        dropped = self.discarded()
+        files = [f for f in sorted(self.raw.glob("*.h5")) if f.stem not in dropped and (not self.only or f.stem in self.only)]
+        if dropped & {f.stem for f in self.raw.glob("*.h5")}:
+            print(f"Not encoded (discarded): {', '.join(sorted(dropped & {f.stem for f in self.raw.glob('*.h5')}))}", flush=True)
+        if not files:
+            print("Nothing to encode.", flush=True)
+            return 0
+        cmd = [sys.executable, "-u", str(LOGGER_DIR / "encode_archive.py"), *map(str, files), "-o", str(self.archive),
                "--skip-existing", "--jobs", str(self.args.jobs), "--threads", str(self.args.threads)]
         if self.args.ffmpeg:
             cmd += ["--ffmpeg", self.args.ffmpeg]
@@ -179,10 +210,14 @@ class Job:
 
     def transfer(self):
         code = 0
+        dropped = sorted(self.discarded())
+        if dropped:
+            print(f"Not copied (discarded): {', '.join(dropped)}", flush=True)
         for local, remote, kind in self.pairs():
             if not local.is_dir():
                 continue
-            cmd = self.rsync + ["--ignore-existing", "--info=stats1,name1", f"{local}/", f"{remote}/"]
+            skip = [f"--exclude=/{stem}.*" for stem in dropped]   # before the --demo rules: first match wins
+            cmd = self.rsync + skip + self.only_filter() + ["--ignore-existing", "--info=stats1,name1", f"{local}/", f"{remote}/"]
             print("$ " + shlex.join(cmd), flush=True)
             res = subprocess.run(cmd)
             if res.returncode:
@@ -192,7 +227,8 @@ class Job:
 
     def send_manifest(self):
         """Copy this PC's manifest.csv to <dest-root>/manifest_inbox/<name>.csv on the Training machine. It never
-        touches the manifest there: `rwr_data.py merge-manifest` folds it in (the Training machine's values win)."""
+        touches the manifest there: `rwr_data.py merge-manifest` folds it in (the Training machine's values win,
+        except keep: a demo discarded here is discarded there too)."""
         manifest = self.data / "manifest.csv"
         if not manifest.is_file():
             return 0
@@ -211,7 +247,7 @@ class Job:
             if not local.is_dir():
                 out[local] = set()
                 continue
-            cmd = self.rsync + ["--checksum", "--dry-run", "--out-format=%i %n", f"{local}/", f"{remote}/"]
+            cmd = self.rsync + self.only_filter() + ["--checksum", "--dry-run", "--out-format=%i %n", f"{local}/", f"{remote}/"]
             res = subprocess.run(cmd, capture_output=True, text=True)
             if res.returncode:
                 print(f"Verification of the {kind} files failed (rsync code {res.returncode}): {res.stderr.strip()[-300:]}", flush=True)
@@ -282,7 +318,8 @@ class Job:
         mism = self.mismatches()
         have_markers = self.fetch_hf_markers()
         ok_stems = []
-        for stem in self.stems():
+        stems = [s for s in self.stems() if not self.only or s in self.only]
+        for stem in stems:
             problems, files = [], {}
             names = self.archive_files(stem)
             if names is None:
@@ -310,7 +347,7 @@ class Job:
             if ok:
                 ok_stems.append(stem)
         n_hf = sum(1 for s in ok_stems if self.status(s).get("hf", {}).get("ok"))
-        print(f"Verified on the Training machine: {len(ok_stems)} of {len(self.stems())} demo(s); "
+        print(f"Verified on the Training machine: {len(ok_stems)} of {len(stems)} demo(s); "
               f"{n_hf} of them backed up on Hugging Face.", flush=True)
         return ok_stems
 
@@ -342,6 +379,19 @@ class Job:
             self.save(stem, cleared={"at": now(), "files": removed})
             cleared += 1
             print(f"{stem}: removed {len(removed)} file(s)", flush=True)
+        # Discarded demos: their raw and processed files go even if they never reached the Training machine (the
+        # person discarded them in APE); the archive, if any, and <demo>.meta.json stay (undo is still possible).
+        for stem in sorted(self.discarded() - set(verified)):
+            removed = []
+            for f in (self.raw / f"{stem}.h5", self.processed / f"{stem}.h5"):
+                if f.is_file():
+                    freed += f.stat().st_size
+                    f.unlink()
+                    removed.append(str(f))
+            if removed:
+                self.save(stem, cleared={"at": now(), "files": removed, "discarded": True})
+                cleared += 1
+                print(f"{stem}: discarded, removed {len(removed)} file(s) (not verified on the Training machine)", flush=True)
         if kept:
             print("Kept (verified on the Training machine, but not backed up on Hugging Face):\n  " + "\n  ".join(kept), flush=True)
         print(f"Cleared {cleared} demo(s), {freed / 1e9:.2f} GB freed.", flush=True)
@@ -363,6 +413,8 @@ def main(argv=None):
     p.add_argument("--rsync-path", default=os.environ.get("APE_REMOTE_RSYNC", ""),
                    help="rsync binary on the Training machine, e.g. ~/.local/rsync/rsync")
     p.add_argument("--no-processed", action="store_true", help="transfer and verify the archive only, not the processed files")
+    p.add_argument("--no-encode", action="store_true", help="transfer: copy what is already encoded, encode nothing")
+    p.add_argument("--demo", action="append", default=[], help="transfer, verify: only this demo (file stem); repeatable")
     p.add_argument("--no-require-hf-backup", dest="require_hf_backup", action="store_false",
                    help="clear demos that are verified on the Training machine even if not backed up on Hugging Face")
     p.add_argument("--after-transfer", default=os.environ.get("APE_ARCHIVE_AFTER_TRANSFER", ""),
@@ -376,7 +428,7 @@ def main(argv=None):
         raise SystemExit("invalid session name")
     job = Job(args)
     if args.action == "transfer":
-        code = job.encode()
+        code = 0 if args.no_encode else job.encode()
         if not job.dest:
             print("No Training machine is set (archive_host in static/local/station.json): archived only, nothing transferred.", flush=True)
             return code

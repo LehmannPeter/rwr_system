@@ -99,6 +99,18 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
      transfer tries again). The logger saves each demo as `<name>.h5.part` and renames it when complete, so a
      half-written file is never read. Log: `~/rwr_humble_ws/work/ape_background.log`. Not yet measured on a real
      recording.
+   - **Each demo is copied as soon as it is encoded** (also in the background, before the next encode): only that
+     demo's archive files (about 350 MB for a 3-minute demo) are copied and verified, plus `manifest.csv`, and the
+     after-transfer step is started on the Training machine (`archive_job.py transfer --no-encode --demo <demo>`).
+     It is suspended during a recording like the encode. It takes demos never verified before; a copy that did not
+     verify (network down, a file that differs there) is tried again after 10 min, at most 3 times per APE run,
+     then left to *Transfer new demos*. Needs `archive_host`; off with `"archive_copy_each_demo": false` in
+     `station.json`. So at the end of a session usually nothing is left to copy.
+   - *Discard* (next to *View*) sets `keep` to `discard` in `manifest.csv`; *Undo* sets it back to `keep`. A
+     discarded demo is not encoded, copied or checked (an encode of it in progress stops), and *Clear* deletes its raw
+     file even if it never reached the Training machine. If it is already there, `manifest.csv` is sent again at
+     once: the merge there takes the Robot PC's `keep` value, so it is left out of dataset versions, and its archive
+     stays there (Undo brings it back the same way).
    - *View* plays a demo (both cameras, with a slider) straight from its raw file, so a demo can be viewed the
      moment it is saved. A demo whose raw file is gone but whose archive is still here plays from the archive
      (decoded on the server: browsers cannot play 4:4:4 video); that is the case after *Clear*, which keeps the
@@ -107,12 +119,15 @@ echo '{"robot_ip": "<address from the course wiki>"}' > ~/Projects/rwr_system/ap
      there (see "Video archive and transfer" below). If a demo is being encoded, it starts right after that demo;
      anything not encoded yet is encoded by the transfer job first. The column *Archive / Training machine* shows per
      demo: waiting to encode, encoding with a progress bar, encoded, encoding failed, copying, not verified,
-     verified, verified + HF, cleared here, and a bar above the table shows how far the session is (encoded counts
-     80 %, verified 100 %). Hover for details (PSNR of the archive check, which file differs).
+     verified, verified + HF, cleared here, discarded, and a bar above the table shows how far the session is
+     (encoded counts 80 %, verified 100 %; discarded demos do not count). Hover for details (PSNR of the archive
+     check, which file differs). Discarded demos are neither encoded nor copied by the transfer.
    - *Clear transferred demos* deletes the raw (and any old processed) files of the demos marked
      *verified* (course rule: clear the Robot PC after each session). Before deleting it compares
      every archive file with the Training machine again, byte for byte; a demo that does not match is
-     kept. The archive (about 15 MB per demo, so cleared demos can still be viewed), `<demo>.meta.json`,
+     kept. Discarded demos lose their raw file too, copied or not (a never-copied one is then gone for good, shown as
+     *deleted here*). The archive (about 2 MB per second of recording, 350 MB for a 3-minute run; cleared demos can
+     still be viewed), `<demo>.meta.json`,
      `manifest.csv` and the check results stay. Archives therefore pile up in `data/archive/`; a way to delete
      those older than N days is planned, not built yet.
 6. **Recalibrate hand at next start** (in *Hand details*): moves the calibration file to
@@ -333,8 +348,9 @@ background already, demo by demo):
    markers (below) and shows *verified + HF* for demos whose archive is backed up there.
 4. **Manifest**: `manifest.csv` is copied to `manifest_inbox/robot_pc.csv` on the Training machine (replaced every
    time). The Training machine's own `manifest.csv` is never overwritten: `rwr_data.py merge-manifest` there adds
-   new rows, keeps its own values (e.g. `keep` or labels corrected there), fills empty fields and lists
-   disagreements in `manifest_conflicts.csv`.
+   new rows, keeps its own values (e.g. labels corrected there), fills empty fields and lists disagreements in
+   `manifest_conflicts.csv`. Except `keep`: there the Robot PC's value wins (since rwr_il `manifest-keep`), so a
+   demo discarded at the station is discarded on the Training machine too; an empty value never erases one.
 5. **Hugging Face backup** (on the Training machine): `python src/logger/hf_backup_archive.py` uploads
    `archive/<session>/`, `manifest.csv` (the merged one; skipped while `manifest_inbox/` has unmerged changes),
    `datasets/*/version.csv` and `provenance/archive_backup.json` (git commits of rwr_system and rwr_il) to the repo in
@@ -407,7 +423,9 @@ new file is read-only. The `/tmp` files are deleted after each demo.
 Manifest: the Robot PC's `manifest.csv` arrives as `manifest_inbox/robot_pc.csv`; `rwr_il/scripts/rwr_data.py
 merge-manifest` (rwr_il branch `manifest-merge`, merged into `training-levers`) folds it into the Training machine's
 `manifest.csv` (new rows added, empty fields filled, the Training machine's values win, disagreements in
-`manifest_conflicts.csv`). Run it before `build` and before the Hugging Face backup.
+`manifest_conflicts.csv`; except `keep`, where the Robot PC's value wins). Run it before `build` and before the
+Hugging Face backup. To discard a demo, use *Discard* in APE: a `keep` changed only on the Training machine is reset
+by the next merge while the Robot PC's row still says `keep`.
 
 Order on the Training machine after a transfer: `merge-manifest`, `hf_backup_archive.py`, `rebuild_processed.py`
 (the backup first: it takes minutes, the rebuild about 11 min per 3-minute demo, and *Clear* waits for the backup).

@@ -91,7 +91,7 @@ def run():
         (RAW / "20261126_150000.h5.part").write_bytes(b"half written")
         stems = ["20261126_150101", "20261126_150202", "20261126_150303"]
         seen_pct, seen_wait = set(), False
-        make_raw(stems[0], size=(360, 640)); S.bg.wake()   # a bigger first one, so its progress can be seen
+        make_raw(stems[0], size=(540, 960)); S.bg.wake()   # camera-sized first one, so its progress can be seen
         threading.Thread(target=lambda: (time.sleep(1.0), make_raw(stems[1]), make_raw(stems[2]), S.bg.wake()), daemon=True).start()
         def watch():
             nonlocal seen_wait
@@ -233,5 +233,6 @@ def run():
         S.cleanup(); os._exit(0 if all(results) else 1)
 
 
-threading.Thread(target=run, daemon=True).start()
-S.uvicorn.run(S.app, host="127.0.0.1", port=8768, log_level="critical")
+if __name__ == "__main__":   # test_discard.py imports this file for its harness
+    threading.Thread(target=run, daemon=True).start()
+    S.uvicorn.run(S.app, host="127.0.0.1", port=8768, log_level="critical")

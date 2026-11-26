@@ -1,5 +1,6 @@
 """Recorded data, hand configuration and hand calibration helpers for APE UI."""
 import csv
+import fcntl
 import importlib.util
 import json
 import os
@@ -39,10 +40,13 @@ def archive_settings():
     """Where and how demos are copied to the Training machine. Set in static/local/station.json, e.g.
     {"archive_host": "<ssh alias>", "archive_data_root": "~/rwr_task2/data",
      "archive_remote_rsync": "~/.local/rsync/rsync",
-     "archive_require_hf_backup": true, "archive_after_transfer": "~/rwr_task2/after_transfer.sh"}
+     "archive_require_hf_backup": true, "archive_after_transfer": "~/rwr_task2/after_transfer.sh",
+     "archive_copy_each_demo": true}
     or with $APE_ARCHIVE_HOST, $APE_ARCHIVE_DATA_ROOT, $APE_REMOTE_RSYNC, $APE_ARCHIVE_TRANSFER_PROCESSED,
-    $APE_ARCHIVE_REQUIRE_HF_BACKUP (0/1), $APE_ARCHIVE_AFTER_TRANSFER, $APE_ARCHIVE_SSH (remote shell, rarely needed).
+    $APE_ARCHIVE_REQUIRE_HF_BACKUP (0/1), $APE_ARCHIVE_AFTER_TRANSFER, $APE_ARCHIVE_COPY_EACH_DEMO (0/1),
+    $APE_ARCHIVE_SSH (remote shell, rarely needed).
     archive_after_transfer is empty by default (off): nothing is started on the Training machine.
+    archive_copy_each_demo (default on): the background worker copies each demo as soon as it is encoded.
     archive_transfer_processed is still read but no longer used: since 2026-11-26 APE transfers the archive only."""
     try:
         cfg = json.loads(STATION_FILE.read_text())
@@ -60,11 +64,15 @@ def archive_settings():
             "ssh": pick("APE_ARCHIVE_SSH", "archive_ssh"),
             "after_transfer": pick("APE_ARCHIVE_AFTER_TRANSFER", "archive_after_transfer"),
             "transfer_processed": flag("APE_ARCHIVE_TRANSFER_PROCESSED", "archive_transfer_processed"),
-            "require_hf_backup": flag("APE_ARCHIVE_REQUIRE_HF_BACKUP", "archive_require_hf_backup")}
+            "require_hf_backup": flag("APE_ARCHIVE_REQUIRE_HF_BACKUP", "archive_require_hf_backup"),
+            "copy_each": flag("APE_ARCHIVE_COPY_EACH_DEMO", "archive_copy_each_demo")}
 
 
 class DataError(Exception):
     pass
+
+
+KEEP_VALUES = ("keep", "discard")   # the manifest's keep column; dataset versions only take "keep"
 
 
 def safe(name):
@@ -168,6 +176,39 @@ class Station:
         except Exception:
             return {}
 
+    def discarded(self, session=None):
+        """{(session, stem)} whose manifest row says keep=discard (only those of `session` if given)."""
+        return {k for k, r in self._manifest().items()
+                if (r.get("keep") or "").strip().lower() == "discard" and (session is None or k[0] == session)}
+
+    def set_keep(self, session, stem, value):
+        """Set the keep column of one demo in manifest.csv (under the lock rwr_data.py uses). Returns the old value."""
+        safe(session), safe(stem)
+        if value not in KEEP_VALUES:
+            raise DataError(f"keep must be one of {', '.join(KEEP_VALUES)}.")
+        path = self.data / "manifest.csv"
+        with open(self.data / ".manifest.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                with open(path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    cols, rows = list(reader.fieldnames or []), list(reader)
+            except FileNotFoundError:
+                raise DataError("There is no manifest.csv yet.")
+            if "keep" not in cols:
+                raise DataError("manifest.csv has no keep column.")
+            row = next((r for r in rows if r.get("session") == session and Path(r.get("file", "")).stem == stem), None)
+            if row is None:
+                raise DataError(f"{session}/{stem} is not in manifest.csv (it is added when the demo is saved).")
+            old, row["keep"] = row.get("keep", ""), value
+            tmp = path.with_suffix(".csv.tmp")
+            with open(tmp, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=cols, lineterminator="\n")
+                w.writeheader()
+                w.writerows(rows)
+            os.replace(tmp, path)
+        return old
+
     def register(self, session, labels):
         """Add the session's new recordings to manifest.csv with the labels chosen in the page.
         Returns an error text, or "" when it worked."""
@@ -247,6 +288,18 @@ class Station:
         safe(dataset)
         return self._archive_job_args("transfer", dataset)
 
+    def copy_enabled(self):
+        a = archive_settings()
+        return bool(a["host"]) and a["copy_each"]
+
+    def copy_command(self, dataset, stems):
+        """Copy and verify only these demos' archives (already encoded), send manifest.csv, start the after-transfer
+        step. Run by the background worker as soon as a demo is encoded."""
+        cmd = self._archive_job_args("transfer", dataset) + ["--no-encode"]
+        for stem in stems:
+            cmd += ["--demo", safe(stem)]
+        return cmd
+
     def clear_command(self, dataset):
         """Delete the local files of demos that are verified on the Training machine (re-verified first)."""
         if not archive_settings()["host"]:
@@ -260,7 +313,9 @@ class Station:
         except Exception:
             return None
         a, v, c, hf = s.get("archive") or {}, s.get("verified") or {}, s.get("cleared"), s.get("hf") or {}
-        if c:
+        if c and c.get("discarded") and not v.get("ok"):   # a discarded demo deleted by Clear without ever being copied
+            state, text = "deleted", f"discarded, deleted here {c.get('at', '')}; never copied to the Training machine"
+        elif c:
             state, text = "cleared", f"on the Training machine, cleared here {c.get('at', '')}"
         elif v.get("ok"):
             state, text = "verified", f"copied and verified {v.get('at', '')}"
@@ -298,6 +353,7 @@ class Station:
         if self.processed.is_dir():  # processed folders of older sessions
             names |= {d.name[: -len(PROCESSED_SUFFIX)] for d in self.processed.iterdir() if d.is_dir() and d.name.endswith(PROCESSED_SUFFIX)}
         manifest = self._manifest()
+        is_discarded = lambda name, stem: (manifest.get((name, stem), {}).get("keep") or "").strip().lower() == "discard"
         prefix_of = lambda session: (re.match(r"^(s\d+)_\d{4}-\d{2}-\d{2}_.+$", session) or [None, session])[1]
         for name in sorted(names):
             raw_dir, proc_dir, arc_dir = self.raw / name, self.processed / (name + PROCESSED_SUFFIX), self.data / "archive" / name
@@ -316,11 +372,14 @@ class Station:
             for stem in sorted(stems):
                 row = manifest.get((name, stem), {})
                 state = self.archive_state(name, stem)
+                discarded = is_discarded(name, stem)
                 prog = progress_of(arc_dir, stem)
                 if prog:
                     work = {"task": "encode", "pct": round(100 * prog.get("done", 0) / max(1, prog.get("total", 1))), "stage": prog.get("stage", "")}
-                elif busy.get("session") == name and busy.get("demo") == stem:
+                elif busy.get("session") == name and stem in (busy.get("demos") or [busy.get("demo")]):
                     work = {"task": busy.get("task"), "pct": None, "stage": ""}
+                elif discarded:
+                    work = None
                 elif stem in raw and stem not in arc and not (state and state["state"] == "archive_failed"):
                     work = {"task": "wait_encode", "pct": 0, "stage": ""}
                 else:
@@ -334,6 +393,8 @@ class Station:
                     "check": self._summary(name, stem),
                     "colour": row.get("colour", ""),
                     "keep": row.get("keep", ""),
+                    "discarded": discarded,
+                    "in_manifest": bool(row),
                     "archive": state,
                     "work": work,
                     "viewable": stem in raw or self._archive_complete(arc_dir, stem),
@@ -342,16 +403,21 @@ class Station:
             local_gb = lambda d: (d["raw_gb"] or 0) + (d["processed_gb"] or 0) + (((d["archive"] or {}).get("archive_mb") or 0) / 1000 if d["stem_archived"] else 0)
             freed_gb = lambda d: (d["raw_gb"] or 0) + (d["processed_gb"] or 0)   # Clear keeps the archive
             verified = [d for d in demos if d["archive"] and d["archive"]["state"] == "verified"]
+            # discarded demos still on this PC that are not verified there: Clear deletes them anyway (raw, processed)
+            dropped = [d for d in demos if d["discarded"] and d not in verified and (d["raw_gb"] is not None or d["processed_gb"] is not None)]
             out.append({
                 "name": name,
                 "demos": demos,
                 "total_gb": round(sum(local_gb(d) for d in demos), 1),
                 "to_encode": sum(1 for d in demos if d["work"] and d["work"]["task"] in ("encode", "wait_encode")),
-                "to_check": sum(1 for d in demos if d["raw_gb"] is not None and d["check"] is None),
+                "to_check": sum(1 for d in demos if d["raw_gb"] is not None and d["check"] is None and not d["discarded"]),
                 # verified on the Training machine; the clear job checks the Hugging Face backup again itself
                 "clearable": len(verified),
                 "clearable_hf": sum(1 for d in verified if d["archive"]["hf"]),
                 "clearable_gb": round(sum(freed_gb(d) for d in verified), 1),
+                "discard_clearable": len(dropped),
+                "discard_gb": round(sum(freed_gb(d) for d in dropped), 1),
+                "discarded": sum(1 for d in demos if d["discarded"]),
                 "next_number": len(listed) + 1,
             })
         return out
