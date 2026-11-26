@@ -23,6 +23,11 @@ Hugging Face backup: src/logger/hf_backup_archive.py on the Training machine upl
 <demo>.hf.json next to the archive files, with the sha256 of every file as the Hub reports it. `clear` fetches these
 markers and only deletes a demo whose marker lists exactly the local archive files (skip with --no-require-hf-backup).
 
+After a transfer (with --after-transfer CMD, from "archive_after_transfer" in station.json; empty = off): `transfer`
+starts CMD on the Training machine over ssh once verification is done, without waiting for it (15 s timeout). The
+Training machine's ~/rwr_task2/after_transfer.sh detaches itself and runs merge-manifest, the Hugging Face backup and
+the rebuild of the processed files there. If ssh fails it prints one line; the exit code of the transfer is not changed.
+
 Status per demo: <status-dir>/<session>/<demo>.json (APE shows it in the demo list).
 Plain Python (stdlib); needs rsync on both machines (3.2.3 or newer for --mkpath) and ssh keys without a
 password prompt (BatchMode).
@@ -227,6 +232,28 @@ class Job:
             return False, "Hugging Face copy differs or is incomplete: " + ", ".join(missing[:3]), marker
         return True, f"on Hugging Face ({marker.get('repo', '?')}, {marker.get('at', '')})", marker
 
+    def trigger_after_transfer(self):
+        """Start the Training machine's after-transfer command (detached there), never waiting for it to finish."""
+        cmd = self.args.after_transfer.strip()
+        if not cmd:
+            return
+        remote = f"{cmd} --session {shlex.quote(self.session)} </dev/null >/dev/null 2>&1"
+        if self.args.host:
+            argv = shlex.split(self.args.ssh or DEFAULT_SSH) + [self.args.host, remote]
+        else:   # tests: --local-dest stands in for the Training machine, so the command runs here
+            argv = ["bash", "-c", remote]
+        try:
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+            if res.returncode:
+                print(f"After-transfer step on the Training machine not started (code {res.returncode}): "
+                      f"{(res.stderr or res.stdout).strip()[-200:]}", flush=True)
+            else:
+                print(f"After-transfer step started on the Training machine: {cmd}", flush=True)
+        except subprocess.TimeoutExpired:
+            print(f"After-transfer step on the Training machine not started: no answer within 15 s ({cmd})", flush=True)
+        except OSError as exc:
+            print(f"After-transfer step on the Training machine not started: {exc}", flush=True)
+
     def verify(self):
         """Mark every demo verified or not, and refresh its Hugging Face state. Returns the verified stems."""
         mism = self.mismatches()
@@ -314,6 +341,8 @@ def main(argv=None):
     p.add_argument("--no-processed", action="store_true", help="transfer and verify the archive only, not the processed files")
     p.add_argument("--no-require-hf-backup", dest="require_hf_backup", action="store_false",
                    help="clear demos that are verified on the Training machine even if not backed up on Hugging Face")
+    p.add_argument("--after-transfer", default=os.environ.get("APE_ARCHIVE_AFTER_TRANSFER", ""),
+                   help="command started on the Training machine after a transfer (detached), e.g. ~/rwr_task2/after_transfer.sh")
     p.add_argument("--inbox-name", default="robot_pc", help="manifest.csv is sent as manifest_inbox/<name>.csv")
     p.add_argument("--jobs", type=int, default=2, help="recordings encoded at the same time")
     p.add_argument("--threads", type=int, default=4, help="ffmpeg threads per recording")
@@ -330,6 +359,7 @@ def main(argv=None):
         code = job.transfer() or code
         code = job.send_manifest() or code
         job.verify()
+        job.trigger_after_transfer()   # never changes the exit code
         return code
     if not job.dest:
         raise SystemExit("No Training machine is set (archive_host in static/local/station.json).")

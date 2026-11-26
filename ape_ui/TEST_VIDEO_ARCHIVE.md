@@ -1,4 +1,4 @@
-# Test checklist: video archive, transfer and clearing (Robot PC, branch `video-archive`)
+# Test checklist: video archive, transfer and clearing (Robot PC, branch `video-archive`; sections 7–8: `archive-only`)
 
 Nothing here moves the robot. Do it before or after a recording session, with APE running and no launch needed.
 Use a test session (e.g. `s90_<date>_test`) with 2–3 short demos; real sessions only after every step passed.
@@ -61,5 +61,32 @@ Use a test session (e.g. `s90_<date>_test`) with 2–3 short demos; real session
       is refused with a message.
 - [ ] With the network cable to the Training machine unplugged: *Process* still archives, the log shows an rsync/ssh
       error, demos stay *not verified*, *Clear* deletes nothing.
+
+## 7. Switch to archive-only transfer (between sessions, after sections 0–6 passed)
+Do this only when no *Process* job runs and every session that was copied with processed files is fully transferred
+(column *verified* for all its demos), so no session is half copied with and half without processed files.
+- [ ] `git fetch && git switch archive-only` (or the branch it was merged into); restart APE (`run.sh`).
+- [ ] In `ape_ui/static/local/station.json` set `"archive_transfer_processed": false`; leave
+      `archive_require_hf_backup` as it is (see section 8). Restart APE.
+- [ ] Record 2–3 short demos in a new test session (e.g. `s91_<date>_test`), *Process and check new demos*:
+      the log shows only the `archive/` rsync (no `processed/` rsync), then "Verified on the Training machine: N of N".
+- [ ] Set `"archive_after_transfer": "~/rwr_task2/after_transfer.sh"` in `station.json`, restart APE, *Process* again.
+      The job log ends with "After-transfer step started on the Training machine" (not "not started").
+- [ ] On the Training machine `~/rwr_task2/logs/after_transfer/latest.log` shows a run started at that time: steps
+      merge-manifest, hf-backup, rebuild each "ok", and "after_transfer done". `processed/s91_<date>_test_10hz/` now
+      holds one file per test demo (root attribute `rebuilt_from_video_archive`), the manifest has the test demos,
+      and `archive/s91_<date>_test/<demo>.hf.json` exists for each.
+- [ ] *Process* once more: a new `latest.log` shows the run with nothing to do (0 to rebuild, nothing uploaded).
+- [ ] *Clear transferred demos* (with `archive_require_hf_backup: false` for this test only, or after section 8):
+      raw, processed and archive files of the test demos are gone here; `.meta.json` and manifest rows stay.
+
+## 8. Hugging Face backup required again
+Only after the archive backup runs on the Training machine (`hf_backup_archive.py` ended with
+"Backed up and verified on the Hub: N demo(s)" for the sessions that are still on this PC).
+- [ ] In `station.json` set `"archive_require_hf_backup": true` (or remove the key: true is the default); restart APE.
+- [ ] *Process* (or *Clear* on a session without HF backup yet): demos without a marker show *verified*, not
+      *verified + HF*; *Clear* lists them under "Kept … not backed up on Hugging Face" and deletes nothing of them.
+- [ ] After `hf_backup_archive.py` has run for that session on the Training machine: *Process* again shows
+      *verified + HF*; *Clear* deletes them.
 
 Report results in `handoff/ROBOT_PC_STATE.md`.

@@ -39,9 +39,10 @@ def archive_settings():
     """Where and how demos are copied to the Training machine. Set in static/local/station.json, e.g.
     {"archive_host": "<ssh alias>", "archive_data_root": "~/rwr_task2/data",
      "archive_remote_rsync": "~/.local/rsync/rsync", "archive_transfer_processed": true,
-     "archive_require_hf_backup": true}
+     "archive_require_hf_backup": true, "archive_after_transfer": "~/rwr_task2/after_transfer.sh"}
     or with $APE_ARCHIVE_HOST, $APE_ARCHIVE_DATA_ROOT, $APE_REMOTE_RSYNC, $APE_ARCHIVE_TRANSFER_PROCESSED,
-    $APE_ARCHIVE_REQUIRE_HF_BACKUP (0/1), $APE_ARCHIVE_SSH (remote shell, rarely needed)."""
+    $APE_ARCHIVE_REQUIRE_HF_BACKUP (0/1), $APE_ARCHIVE_AFTER_TRANSFER, $APE_ARCHIVE_SSH (remote shell, rarely needed).
+    archive_after_transfer is empty by default (off): nothing is started on the Training machine."""
     try:
         cfg = json.loads(STATION_FILE.read_text())
     except Exception:
@@ -56,6 +57,7 @@ def archive_settings():
             "data_root": pick("APE_ARCHIVE_DATA_ROOT", "archive_data_root", "~/rwr_task2/data"),
             "remote_rsync": pick("APE_REMOTE_RSYNC", "archive_remote_rsync"),
             "ssh": pick("APE_ARCHIVE_SSH", "archive_ssh"),
+            "after_transfer": pick("APE_ARCHIVE_AFTER_TRANSFER", "archive_after_transfer"),
             "transfer_processed": flag("APE_ARCHIVE_TRANSFER_PROCESSED", "archive_transfer_processed"),
             "require_hf_backup": flag("APE_ARCHIVE_REQUIRE_HF_BACKUP", "archive_require_hf_backup")}
 
@@ -233,6 +235,8 @@ class Station:
             cmd += ["--ssh", a["ssh"]]
         if not a["transfer_processed"]:
             cmd.append("--no-processed")
+        if action == "transfer" and a["after_transfer"]:
+            cmd += ["--after-transfer", a["after_transfer"]]
         if action == "clear" and not a["require_hf_backup"]:
             cmd.append("--no-require-hf-backup")
         return cmd

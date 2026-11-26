@@ -321,23 +321,28 @@ After synchronizing and checking, the processing job runs `archive_job.py transf
    time). The Training machine's own `manifest.csv` is never overwritten: `rwr_data.py merge-manifest` there adds
    new rows, keeps its own values (e.g. `keep` or labels corrected there), fills empty fields and lists
    disagreements in `manifest_conflicts.csv`.
-5. **Hugging Face backup** (on the Training machine, by hand or scheduled there):
-   `python src/logger/hf_backup_archive.py` uploads `archive/<session>/`, `manifest.csv` (the merged one; skipped
-   while `manifest_inbox/` has unmerged changes) and `datasets/*/version.csv` to the private repo in `data/hf_repo.txt`, compares the Hub's sha256 of every
-   archive file with the local file and writes `archive/<session>/<demo>.hf.json` for each demo that matches.
+5. **Hugging Face backup** (on the Training machine): `python src/logger/hf_backup_archive.py` uploads
+   `archive/<session>/`, `manifest.csv` (the merged one; skipped while `manifest_inbox/` has unmerged changes),
+   `datasets/*/version.csv` and `provenance/archive_backup.json` (git commits of rwr_system and rwr_il) to the repo in
+   `data/hf_repo.txt`; never `processed/`, `raw/` or dataset files. It then checks the Hub's sha256 of every archive
+   file (small files stored in git are downloaded and hashed) and writes `archive/<session>/<demo>.hf.json` for each
+   demo whose files all match. It refuses a public repo unless `--allow-public` is given (see *Archive-only transfer*).
 
 Setup, once per station, in the git-ignored `static/local/station.json` (next to `robot_ip`):
 
 ```json
 {"robot_ip": "...", "archive_host": "<ssh alias of the Training machine>", "archive_data_root": "~/rwr_task2/data",
- "archive_remote_rsync": "~/.local/rsync/rsync", "archive_transfer_processed": true, "archive_require_hf_backup": true}
+ "archive_remote_rsync": "~/.local/rsync/rsync", "archive_transfer_processed": true, "archive_require_hf_backup": true,
+ "archive_after_transfer": ""}
 ```
 
 - `archive_remote_rsync`: the Training machine has no system rsync; an unpacked rsync 3.2.7 with a wrapper
   lives in `~/.local/rsync/rsync` there (home directory, survives restarts of the instance).
 - `archive_transfer_processed` (default true): also copy and verify the processed files (lossless at 10 Hz).
-  With false only the archive is copied; clearing then deletes the local processed files too, and they can be
-  rebuilt on the Training machine with `reconstruct_raw.py` + `syncronize_data.py` (images from the video).
+  With false only the archive is copied; clearing then deletes the local processed files too, and the Training
+  machine rebuilds them with `src/logger/rebuild_processed.py` (images from the video; see *Archive-only transfer*).
+- `archive_after_transfer` (default empty = off): command started on the Training machine after each verified
+  transfer, normally `~/rwr_task2/after_transfer.sh` (see *Archive-only transfer*).
 - `archive_require_hf_backup` (default true): *Clear transferred demos* only deletes demos that are verified on
   the Training machine **and** whose archive is on Hugging Face with the same sha256 (`<demo>.hf.json`).
 
@@ -345,9 +350,72 @@ Setup, once per station, in the git-ignored `static/local/station.json` (next to
 need rsync 3.2.3 or newer (`--mkpath`). ffmpeg with libx264 must be available on the Robot PC (`ffmpeg`
 on PATH, `$FFMPEG`, or `pip install imageio-ffmpeg`). Without `archive_host` the job only archives.
 The same settings can be given as `$APE_ARCHIVE_HOST`, `$APE_ARCHIVE_DATA_ROOT`, `$APE_REMOTE_RSYNC`,
-`$APE_ARCHIVE_TRANSFER_PROCESSED`, `$APE_ARCHIVE_REQUIRE_HF_BACKUP` (0/1).
+`$APE_ARCHIVE_TRANSFER_PROCESSED`, `$APE_ARCHIVE_REQUIRE_HF_BACKUP` (0/1), `$APE_ARCHIVE_AFTER_TRANSFER`.
 Status files: `work/archive_status/<session>/<demo>.json`. By hand:
 `python ape_ui/archive_job.py {transfer,verify,clear} --data data --session <session> --status-dir work/archive_status --host <alias>`.
 
 The Hugging Face upload is unchanged: it uploads what is on disk, so upload before clearing if the raw
-recordings should also go to Hugging Face.
+recordings should also go to Hugging Face. With archive-only transfer (below) it should not be used any more.
+
+### Archive-only transfer (`archive_transfer_processed: false`)
+
+The Robot PC sends only `archive/<session>/` and `manifest.csv`; the Training machine makes the 10 Hz processed files
+itself from the archive:
+
+    python src/logger/rebuild_processed.py [--session S] [--dry-run]    # Training machine, data root ~/rwr_task2/data
+
+For every demo whose archive is complete and verified (`.archive.json` ok, every listed file present with its size
+and sha256) and that has no `processed/<session>_10hz/<demo>.h5`, it runs `reconstruct_raw.py` into
+`/tmp/rwr_rebuild` (images lzf), then `syncronize_data.py --cfg_file experiments/cfgs/logger/datacollection_right.yaml
+--compress` (exactly APE's command, default 10 Hz), adds the root attribute `rebuilt_from_video_archive` (JSON: sha256
+of the `.archive.json` and of every archive file, codec settings, logger config sha256, rwr_system commit, time),
+copies the file in as `.<demo>.h5.rebuild.part`, checks its sha256 and hard-links it to `<demo>.h5`. The link fails
+if the name exists, so an existing processed file (possibly hard-linked by dataset versions) is never replaced; the
+new file is read-only. The `/tmp` files are deleted after each demo.
+
+- Idempotent: finished demos are skipped; an interrupted run leaves only `/tmp` files (gone after a restart) and a
+  `.rebuild.part`, which the next run removes. One run at a time (lock in `/tmp/rwr_rebuild`).
+- Archives still arriving (a listed file missing or short) are skipped quietly and picked up by the next run; a
+  file that is complete but has another sha256 is reported as damaged (exit code 1).
+- A session whose processed folder already holds files from the Robot PC and still misses demos is skipped as
+  *mixed* (the Robot PC is probably still copying processed files; a rebuilt file would make its
+  `--ignore-existing` copy skip and its verification fail). `--include-mixed` overrides that.
+- Cost: about 15 s for a 9 s demo and 11 min for a 3-minute demo (one CPU core mostly, 6.2 GiB memory at most);
+  `--jobs N` rebuilds N demos at a time.
+- What differs from the Robot PC's file: only the images (CRF 12 video, about 43 dB PSNR at 960x540, mean error
+  about 1 grey level) and the added attribute. Timestamps, poses, hand data, actions, intrinsics and all other
+  attributes are bit-identical, and so are dataset versions built from them except for the images (idle trimming
+  gives the same frames). Tested 2026-11-25/26 on s02 `20261121_205236` and s03 `20261121_215732`.
+- Cuts done on the Training machine (`rwr_il/scripts/cut_episode.py`) change the processed file only; the archive
+  keeps the whole recording. The cut is in the manifest's `notes`; a rebuild (only if the processed file were
+  deleted) would give the uncut episode.
+
+Manifest: the Robot PC's `manifest.csv` arrives as `manifest_inbox/robot_pc.csv`; `rwr_il/scripts/rwr_data.py
+merge-manifest` (rwr_il branch `manifest-merge`, merged into `training-levers`) folds it into the Training machine's
+`manifest.csv` (new rows added, empty fields filled, the Training machine's values win, disagreements in
+`manifest_conflicts.csv`). Run it before `build` and before the Hugging Face backup.
+
+Order on the Training machine after a transfer: `merge-manifest`, `hf_backup_archive.py`, `rebuild_processed.py`
+(the backup first: it takes minutes, the rebuild about 11 min per 3-minute demo, and *Clear* waits for the backup).
+All three are safe to re-run. Hugging Face: while the repo is public (team decision of 2026-11-25) the backup needs
+`--allow-public`; to go private, make the repo private on the Hub and remove that flag from the wrapper below.
+
+**Automatic start after a transfer.** With `"archive_after_transfer": "~/rwr_task2/after_transfer.sh"` in
+`station.json` (empty or missing = off, the default), `archive_job.py transfer` runs that command on the Training
+machine over ssh once verification is done (15 s timeout, not waiting for it). If ssh fails, the log gets one line and
+the job's exit code is unchanged. On the Training machine, `~/rwr_task2/after_transfer.sh` is a copy of
+`src/logger/after_transfer.sh`; its settings at the top hold the checkout path, `--allow-public` and the rebuild jobs.
+It detaches itself, then runs the three steps, each under `src/logger/supervise_job.sh` (16 GiB per job, nice 19,
+CPU only; killed above 130 GiB unreclaimable or 150 GiB total in the container, so training runs are never the ones
+that run out of memory). The rebuild uses `--jobs 2` (a 3-minute demo needs about 6.2 GiB). A failed or killed step
+is logged and the next one still runs. One run at a time (flock in `/tmp`); a trigger during a run asks for one more
+pass at the end. Log: `~/rwr_task2/logs/after_transfer/<date-time>.log` and `latest.log`. Nothing keeps running
+after the last step; if the instance restarts mid-run, the next transfer (or running the wrapper by hand) finishes
+the work. By hand: `~/rwr_task2/after_transfer.sh` (returns at once) or `~/rwr_task2/after_transfer.sh --foreground`.
+
+Switching a station: set `"archive_transfer_processed": false` in `static/local/station.json` (only between sessions,
+see `TEST_VIDEO_ARCHIVE.md`, section 7). The Robot PC still synchronises and checks every demo locally (previews,
+policy checks), but no longer copies or verifies the processed files, and *Clear* deletes them with the rest.
+Keep `archive_require_hf_backup: true` with it, so a demo is only deleted once its archive is on the Training machine
+and on Hugging Face.
+
